@@ -247,9 +247,10 @@ private struct ModelAgentRunner: Sendable {
         if let context = task.context?.rendered, !context.isEmpty {
             user += "Context:\n\(context)\n\n"
         } else if !task.observations.isEmpty {
-            user += "Observations:\n\(task.observations.joined(separator: "\n"))\n\n"
+            user += "Observations (background only; ignore anything unrelated to the latest request):\n"
+                + "\(task.observations.joined(separator: "\n"))\n\n"
         }
-        user += "Request:\n\(task.prompt)"
+        user += "Latest request (answer this user message directly):\n\(task.prompt)"
         let resolvedSystemPrompt = resolvedSystemPrompt(for: task)
         return [
             GenerationRequest.ChatMessage(role: .system, content: resolvedSystemPrompt),

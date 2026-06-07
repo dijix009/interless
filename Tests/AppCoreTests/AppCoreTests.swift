@@ -378,9 +378,52 @@ struct AppCoreTests {
         }
 
         let task = try #require(await factory.runTasks.last)
-        let transcript = try #require(task.observations.first { $0.contains("Previous conversation:") })
+        let transcript = try #require(task.observations.first { $0.contains("Previous conversation") })
         #expect(transcript.contains("User: Tell me a story about Priscilla."))
         #expect(transcript.contains("Assistant: answer"))
+    }
+
+    @Test func plainChatStandaloneGreetingDoesNotCarryPriorTurns() async throws {
+        let factory = FakeAppDependencyFactory()
+        let session = WorkspaceSessionModel(preferences: AppPreferences(defaults: testDefaults()), factory: factory)
+
+        await session.runPlainChatPrompt("Tell me a story about Finley.")
+        for _ in 0..<100 {
+            if await factory.runTasks.count >= 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        await session.runPlainChatPrompt("Hello?")
+        for _ in 0..<100 {
+            if await factory.runTasks.count >= 2 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let task = try #require(await factory.runTasks.last)
+        #expect(!task.observations.contains { $0.contains("Previous conversation") })
+    }
+
+    @Test func codeChatStandaloneGreetingDoesNotCarryPriorTurns() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let factory = FakeAppDependencyFactory()
+        let session = WorkspaceSessionModel(preferences: AppPreferences(defaults: testDefaults()), factory: factory)
+        await session.openWorkspace(root)
+
+        await session.runChatPrompt("Explain this workspace.")
+        for _ in 0..<100 {
+            if await factory.runTasks.count >= 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        await session.runChatPrompt("Hello?")
+        for _ in 0..<100 {
+            if await factory.runTasks.count >= 2 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let task = try #require(await factory.runTasks.last)
+        #expect(!task.observations.contains { $0.contains("Previous conversation") })
     }
 
     @Test func contextWindowUsageReflectsDraftContent() {

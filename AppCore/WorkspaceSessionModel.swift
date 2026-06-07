@@ -758,7 +758,7 @@ public final class WorkspaceSessionModel: ObservableObject {
         }
         let session = await prepareSessionForPrompt(promptText, workspacePath: workspaceURL?.path, mode: .code)
         let sessionID = session?.id
-        let priorTranscript = priorChatTranscriptObservation()
+        let priorTranscript = priorChatTranscriptObservation(for: promptText)
         await publish(.init(kind: .chat, message: "Starting agent chat"))
         let start = ContinuousClock.now
         let taskID = await taskScheduler.begin(kind: "chat", title: "Agent chat", priority: .userInitiated)
@@ -850,7 +850,7 @@ public final class WorkspaceSessionModel: ObservableObject {
         }
         let session = await prepareSessionForPrompt(promptText, workspacePath: nil, mode: .chat)
         let sessionID = session?.id
-        let priorTranscript = priorChatTranscriptObservation()
+        let priorTranscript = priorChatTranscriptObservation(for: promptText)
         await publish(.init(kind: .chat, message: "Starting plain chat"))
         let start = ContinuousClock.now
         let taskID = await taskScheduler.begin(kind: "chat", title: "Plain chat", priority: .userInitiated)
@@ -1703,10 +1703,11 @@ public final class WorkspaceSessionModel: ObservableObject {
     private func estimatedContextWindowUsage() -> (label: String, fraction: Double) {
         let budget = ResourceBudget.resolved(for: settings.resourceProfile)
         let role: ModelRole = settings.usesSingleAgentMode() ? .orchestrator : .utility
+        let mode = visibleConversationMode
         let profileTokenBudget = budget.contextTokenBudget(for: role)
             ?? budget.contextTokenBudget(for: .orchestrator)
         let tokenBudget = [
-            modelContextSettings.contextTokenBudgetOverride,
+            modelContextSettings.contextTokenBudgetOverride(isPlainChat: mode == .chat),
             profileTokenBudget,
         ].compactMap(\.self).min() ?? 1
         let tokenEstimate = estimatedContextTokens(
@@ -1720,21 +1721,55 @@ public final class WorkspaceSessionModel: ObservableObject {
         messages: [ChatMessageViewState],
         draft: String
     ) -> Int {
-        let transcriptCharacters = messages.reduce(0) { partial, message in
-            guard !message.isToolEvent else { return partial }
-            return partial + message.text.count
-        }
-        let draftCharacters = draft.trimmingCharacters(in: .whitespacesAndNewlines).count
-        let messageOverhead = max(1, messages.filter { !$0.isToolEvent }.count) * 8
+        let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let transcriptCharacters = priorChatTranscriptObservation(for: trimmedDraft)?.count ?? 0
+        let draftCharacters = trimmedDraft.count
+        let messageCount = (transcriptCharacters > 0 ? messages.filter { !$0.isToolEvent }.count : 0)
+            + (trimmedDraft.isEmpty ? 0 : 1)
+        let messageOverhead = max(0, messageCount) * 8
         return Int(ceil(Double(transcriptCharacters + draftCharacters) / 4.0)) + messageOverhead
     }
 
-    private func priorChatTranscriptObservation() -> String? {
+    private func priorChatTranscriptObservation(for promptText: String? = nil) -> String? {
+        if let promptText,
+           !Self.shouldIncludePriorChatTranscript(for: promptText) {
+            return nil
+        }
         let budget = ResourceBudget.resolved(for: settings.resourceProfile)
         let limit = max(1_200, min(16_000, budget.maxContextCharacters / 2))
         let rows = boundedPriorChatTranscriptRows(limit: limit)
         guard !rows.isEmpty else { return nil }
-        return "Previous conversation:\n" + rows.joined(separator: "\n\n")
+        return "Previous conversation (background only; ignore if unrelated to the latest request):\n"
+            + rows.joined(separator: "\n\n")
+    }
+
+    private static func shouldIncludePriorChatTranscript(for promptText: String) -> Bool {
+        let normalized = promptText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".!,?;:"))
+        guard !normalized.isEmpty else { return false }
+        let standaloneAcknowledgements: Set<String> = [
+            "hi",
+            "hello",
+            "hello there",
+            "hey",
+            "hey there",
+            "hi there",
+            "hiya",
+            "yo",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "ok",
+            "okay",
+            "cool",
+            "thanks",
+            "thank you",
+        ]
+        return !standaloneAcknowledgements.contains(normalized)
     }
 
     private func boundedPriorChatTranscriptRows(limit: Int) -> [String] {
