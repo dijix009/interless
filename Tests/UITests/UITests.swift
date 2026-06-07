@@ -174,6 +174,35 @@ struct UITests {
         #expect(ModelContextSettingsViewState().maxAnswerTokens(isPlainChat: true) == nil)
         #expect(ModelContextSettingsViewState().contextTokenBudgetOverride(isPlainChat: true) == nil)
         #expect(ModelContextSettingsViewState.displayTokenValue(0) == "Automatic")
+        #expect(ModelContextSettingsViewState.classicAnswerTokenSteps == [
+            0,
+            1_024,
+            2_048,
+            4_096,
+            8_192,
+            16_384,
+            32_768,
+        ])
+        #expect(ModelContextSettingsViewState.classicContextWindowTokenSteps.suffix(3) == [
+            32_768,
+            65_536,
+            131_072,
+        ])
+        #expect(ModelContextSettingsViewState.nearestTokenStepIndex(
+            for: 1_800,
+            in: ModelContextSettingsViewState.classicAnswerTokenSteps) == 2)
+        #expect(ModelContextSettingsViewState.snappedTokenValue(
+            1_920,
+            in: ModelContextSettingsViewState.classicAnswerTokenSteps,
+            snapDistance: ModelContextSettingsViewState.answerTokenSnapDistance) == 2_048)
+        #expect(ModelContextSettingsViewState.snappedTokenValue(
+            2_432,
+            in: ModelContextSettingsViewState.classicAnswerTokenSteps,
+            snapDistance: ModelContextSettingsViewState.answerTokenSnapDistance) == 2_432)
+        #expect(ModelContextSettingsViewState.snappedTokenValue(
+            65_024,
+            in: ModelContextSettingsViewState.classicContextWindowTokenSteps,
+            snapDistance: ModelContextSettingsViewState.contextWindowTokenSnapDistance) == 65_536)
         #expect(settings.plainChatMaxAnswerTokens == ModelContextSettingsViewState.minimumAnswerTokens)
         #expect(settings.codeChatMaxAnswerTokens == ModelContextSettingsViewState.maximumAnswerTokens)
         #expect(settings.plainChatMaxContextWindowTokens == ModelContextSettingsViewState.minimumContextWindowTokens)

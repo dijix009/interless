@@ -606,6 +606,28 @@ public struct ModelContextSettingsViewState: Sendable, Equatable, Codable {
     public static let maximumAnswerTokens = 32_768
     public static let minimumContextWindowTokens = 1_024
     public static let maximumContextWindowTokens = 131_072
+    public static let answerTokenSnapDistance = answerTokenStep * 2
+    public static let contextWindowTokenSnapDistance = contextTokenStep
+    public static let classicAnswerTokenSteps = [
+        0,
+        1_024,
+        2_048,
+        4_096,
+        8_192,
+        16_384,
+        32_768,
+    ]
+    public static let classicContextWindowTokenSteps = [
+        0,
+        1_024,
+        2_048,
+        4_096,
+        8_192,
+        16_384,
+        32_768,
+        65_536,
+        131_072,
+    ]
 
     public var plainChatMaxAnswerTokens: Int
     public var codeChatMaxAnswerTokens: Int
@@ -663,6 +685,26 @@ public struct ModelContextSettingsViewState: Sendable, Equatable, Codable {
 
     public static func displayTokenValue(_ value: Int) -> String {
         value > 0 ? "\(value.formatted()) tokens" : "Automatic"
+    }
+
+    public static func nearestTokenStepIndex(for value: Int, in steps: [Int]) -> Int {
+        guard !steps.isEmpty else { return 0 }
+        var bestIndex = 0
+        var bestDistance = abs(value - steps[0])
+        for index in steps.indices.dropFirst() {
+            let distance = abs(value - steps[index])
+            if distance < bestDistance {
+                bestIndex = index
+                bestDistance = distance
+            }
+        }
+        return bestIndex
+    }
+
+    public static func snappedTokenValue(_ value: Int, in steps: [Int], snapDistance: Int) -> Int {
+        guard !steps.isEmpty, snapDistance >= 0 else { return value }
+        let nearest = steps[nearestTokenStepIndex(for: value, in: steps)]
+        return abs(value - nearest) <= snapDistance ? nearest : value
     }
 
     private static func normalizedAnswerTokenValue(_ value: Int) -> Int {
