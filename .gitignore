@@ -1,0 +1,25 @@
+# Swift Package Manager / build artifacts
+.build/
+.swiftpm/
+Package.resolved
+DerivedData/
+
+# Xcode (added at Phase 4)
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+
+# macOS
+.DS_Store
+
+# --- CRITICAL: never commit MLX model weights / Hugging Face cache ---
+# Multi-GB blobs must never enter git history.
+*.safetensors
+*.gguf
+*.npz
+*.mlx
+Models/
+Resources/Models/
+huggingface/
+**/huggingface/**
+.cache/huggingface/
