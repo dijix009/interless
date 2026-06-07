@@ -285,6 +285,8 @@ public struct SettingsHubView: View {
                     value: answerTokenBinding(for: selectedModelContextMode),
                     range: 0...ModelContextSettingsViewState.maximumAnswerTokens,
                     step: ModelContextSettingsViewState.answerTokenStep,
+                    steps: ModelContextSettingsViewState.classicAnswerTokenSteps,
+                    snapDistance: ModelContextSettingsViewState.answerTokenSnapDistance,
                     detail: selectedModelContextMode == .chat
                         ? "Plain chat conversations."
                         : "Workspace/code agent sessions.")
@@ -293,6 +295,8 @@ public struct SettingsHubView: View {
                     value: contextWindowBinding(for: selectedModelContextMode),
                     range: 0...ModelContextSettingsViewState.maximumContextWindowTokens,
                     step: ModelContextSettingsViewState.contextTokenStep,
+                    steps: ModelContextSettingsViewState.classicContextWindowTokenSteps,
+                    snapDistance: ModelContextSettingsViewState.contextWindowTokenSnapDistance,
                     detail: "The active resource profile still applies as a safety cap.")
                 settingsRow("Effective context cap", value: effectiveContextCapLabel(isPlainChat: selectedModelContextMode.isPlainChat))
             }
@@ -532,9 +536,11 @@ public struct SettingsHubView: View {
         value: Binding<Int>,
         range: ClosedRange<Int>,
         step: Int,
+        steps: [Int],
+        snapDistance: Int,
         detail: String
     ) -> some View {
-        VStack(alignment: .leading, spacing: .space1) {
+        return VStack(alignment: .leading, spacing: .space1) {
             HStack(alignment: .firstTextBaseline) {
                 Text(label)
                     .font(.bodyS)
@@ -547,13 +553,52 @@ public struct SettingsHubView: View {
             Slider(
                 value: Binding(
                     get: { Double(value.wrappedValue) },
-                    set: { value.wrappedValue = Int($0.rounded()) }),
+                    set: { newValue in
+                        let rounded = Int(newValue.rounded())
+                        value.wrappedValue = ModelContextSettingsViewState.snappedTokenValue(
+                            rounded,
+                            in: steps,
+                            snapDistance: snapDistance)
+                    }),
                 in: Double(range.lowerBound)...Double(range.upperBound),
                 step: Double(step))
+            .accessibilityValue(ModelContextSettingsViewState.displayTokenValue(value.wrappedValue))
+            tokenSnapMarks(steps: steps, range: range)
             Text(detail)
                 .font(.caption)
                 .foregroundStyle(Theme.C.textTertiary)
         }
+    }
+
+    private func tokenSnapMarks(steps: [Int], range: ClosedRange<Int>) -> some View {
+        Canvas { context, size in
+            let span = max(range.upperBound - range.lowerBound, 1)
+            let width = max(size.width, 1)
+            for step in steps {
+                let clamped = min(max(step, range.lowerBound), range.upperBound)
+                let x = width * CGFloat(clamped - range.lowerBound) / CGFloat(span)
+                let labelX = min(max(x, 12), width - 12)
+                var tick = Path()
+                tick.move(to: CGPoint(x: x, y: 0))
+                tick.addLine(to: CGPoint(x: x, y: 5))
+                context.stroke(tick, with: .color(Theme.C.border), lineWidth: 1)
+                context.draw(
+                    Text(compactTokenStepLabel(step))
+                        .font(.system(size: 8, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.C.textTertiary),
+                    at: CGPoint(x: labelX, y: 14))
+            }
+        }
+        .frame(height: 18)
+        .accessibilityHidden(true)
+    }
+
+    private func compactTokenStepLabel(_ value: Int) -> String {
+        guard value > 0 else { return "Auto" }
+        if value >= 1_024 {
+            return "\(value / 1_024)k"
+        }
+        return "\(value)"
     }
 
     private func answerTokenBinding(for mode: ModelContextMode) -> Binding<Int> {
