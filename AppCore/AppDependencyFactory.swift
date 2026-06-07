@@ -1,0 +1,495 @@
+import Foundation
+import Agents
+import Core
+import MLXEngine
+import Persistence
+import Shared
+import Tooling
+import UI
+import Workspace
+
+public enum AppRuntimeError: Error, Sendable, Equatable {
+    case workspaceNotOpen
+    case invalidModelSettings([String])
+}
+
+public typealias ModelLoadProgressReporter = @Sendable (
+    _ modelID: String,
+    _ role: ModelRole,
+    _ fractionCompleted: Double
+) -> Void
+
+public struct WorkspaceEnvironment: Sendable {
+    public var root: URL
+    public var reindex: @Sendable () async -> AsyncStream<IndexingProgress>
+    public var watch: @Sendable () async -> AsyncStream<IndexingProgress>
+    public var search: @Sendable (_ query: String, _ limit: Int) async throws -> [SearchHit]
+    public var previewFile: @Sendable (_ relativePath: String) async throws -> FilePreviewViewState
+    public var fileTree: @Sendable () async throws -> [FileTreeNode]
+    public var gitStatus: @Sendable () async -> GitStatus
+    public var gitDiff: @Sendable (_ path: String?) async throws -> String
+    public var runAgent: @Sendable (_ task: AgentTask, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async -> AsyncThrowingStream<AgentEvent, Error>
+    public var loadModels: @Sendable (_ settings: ModelSettingsViewState, _ progressReporter: ModelLoadProgressReporter?) async throws -> Void
+    public var unloadModels: @Sendable () async -> Void
+    public var memoryPolicy: @Sendable () async -> MemoryPolicyState
+
+    public init(
+        root: URL,
+        reindex: @escaping @Sendable () async -> AsyncStream<IndexingProgress>,
+        watch: @escaping @Sendable () async -> AsyncStream<IndexingProgress>,
+        search: @escaping @Sendable (_ query: String, _ limit: Int) async throws -> [SearchHit],
+        previewFile: @escaping @Sendable (_ relativePath: String) async throws -> FilePreviewViewState,
+        fileTree: @escaping @Sendable () async throws -> [FileTreeNode],
+        gitStatus: @escaping @Sendable () async -> GitStatus,
+        gitDiff: @escaping @Sendable (_ path: String?) async throws -> String,
+        runAgent: @escaping @Sendable (_ task: AgentTask, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async -> AsyncThrowingStream<AgentEvent, Error>,
+        loadModels: @escaping @Sendable (_ settings: ModelSettingsViewState, _ progressReporter: ModelLoadProgressReporter?) async throws -> Void,
+        unloadModels: @escaping @Sendable () async -> Void,
+        memoryPolicy: @escaping @Sendable () async -> MemoryPolicyState = {
+            MemoryPolicyState()
+        }
+    ) {
+        self.root = root
+        self.reindex = reindex
+        self.watch = watch
+        self.search = search
+        self.previewFile = previewFile
+        self.fileTree = fileTree
+        self.gitStatus = gitStatus
+        self.gitDiff = gitDiff
+        self.runAgent = runAgent
+        self.loadModels = loadModels
+        self.unloadModels = unloadModels
+        self.memoryPolicy = memoryPolicy
+    }
+}
+
+public struct ToolRuntimeHooks: Sendable {
+    public var permissionAuthorizer: ToolPermissionAuthorizer?
+    public var settlementHandlers: ToolSettlementHandlers
+
+    public init(
+        permissionAuthorizer: ToolPermissionAuthorizer? = nil,
+        settlementHandlers: ToolSettlementHandlers = .empty
+    ) {
+        self.permissionAuthorizer = permissionAuthorizer
+        self.settlementHandlers = settlementHandlers
+    }
+}
+
+public protocol AppDependencyFactory: Sendable {
+    func makeWorkspaceEnvironment(
+        root: URL,
+        settings: ModelSettingsViewState,
+        metricsRecorder: MetricsRecorder,
+        eventBus: EventBus,
+        config: LoadedInterlessConfig?
+    ) async throws -> WorkspaceEnvironment
+}
+
+public struct LiveAppDependencyFactory: AppDependencyFactory {
+    public init() {}
+
+    public func makeWorkspaceEnvironment(
+        root: URL,
+        settings: ModelSettingsViewState,
+        metricsRecorder: MetricsRecorder,
+        eventBus: EventBus,
+        config: LoadedInterlessConfig? = nil
+    ) async throws -> WorkspaceEnvironment {
+        let budget = ResourceBudget.resolved(for: settings.resourceProfile)
+        let agentCatalog = AgentCatalog(configured: config?.effective.agents ?? [:])
+        let coordinator = MemoryBudgetCoordinator(
+            requestedProfile: settings.resourceProfile,
+            metrics: metricsRecorder,
+            events: eventBus)
+        let store = try PersistenceBootstrap.liveStore(forWorkspaceRoot: root)
+        let workspaceConfig = WorkspaceConfig(maxFileSizeBytes: budget.maxIndexedFileSizeBytes)
+        let scanner = FileSystemScanner(config: workspaceConfig)
+        let git = LibGit2Repository()
+        let loader = DiskFileContentLoader()
+        let previewLoader = SafeFilePreviewLoader()
+        let indexer = WorkspaceIndexer(
+            root: root,
+            scanner: scanner,
+            store: store,
+            git: git,
+            loader: loader,
+            config: workspaceConfig,
+            resourceBudget: budget,
+            metrics: metricsRecorder)
+        let watcher = WorkspaceWatcher(
+            root: root,
+            eventStream: FSEventsWorkspaceEventStream(),
+            indexer: indexer)
+        let snapshotStore = WorkspaceSnapshotStore(
+            root: root,
+            maxEntryBytes: budget.maxIndexedFileSizeBytes)
+        let controller = LazyInferenceController(
+            resourceProfile: settings.resourceProfile,
+            memoryCoordinator: coordinator)
+
+        return WorkspaceEnvironment(
+            root: root,
+            reindex: {
+                await indexer.reindex()
+            },
+            watch: {
+                await watcher.start()
+            },
+            search: { query, limit in
+                let lexical = try await indexer.search(query, limit: limit)
+                guard await controller.loadedRoles().contains(.embeddings) else {
+                    return lexical
+                }
+                let vectors = try await controller.embed(texts: ["search_query: \(query)"])
+                guard let queryVector = vectors.first else { return lexical }
+                let semantic = try await store.semanticSearch(vector: queryVector, limit: limit)
+                return Self.mergeSearchHits(lexical: lexical, semantic: semantic, limit: limit)
+            },
+            previewFile: { relativePath in
+                try await previewLoader.preview(root: root, relativePath: relativePath)
+            },
+            fileTree: {
+                let stream = try await scanner.scan(root: root)
+                var paths: [String] = []
+                for await entry in stream where !entry.isDirectory {
+                    guard paths.count < budget.fileTreePathLimit else { break }
+                    paths.append(entry.relativePath)
+                }
+                return FileTreeNode.grouped(paths: paths)
+            },
+            gitStatus: {
+                await git.snapshot(root: root)
+            },
+            gitDiff: { path in
+                try await git.diff(root: root, path: path)
+            },
+            runAgent: { task, currentSettings, runtimeHooks in
+                let resolvedController = await controller.resolve()
+                let plainChat = Self.isPlainChatTask(task)
+                let runtime = RuntimeConfigMapper.resolve(
+                    config: config?.effective,
+                    settings: currentSettings,
+                    resourceBudget: ResourceBudget.resolved(for: currentSettings.resourceProfile))
+                let canAdvertiseNativeTools = runtime.settings.toolCallFormat != nil
+                return await Self.makeAgent(
+                    root: root,
+                    store: store,
+                    controller: resolvedController,
+                    settings: runtime.settings,
+                    metricsRecorder: metricsRecorder,
+                    includesWorkspaceContext: !plainChat,
+                    advertisesTools: !plainChat && canAdvertiseNativeTools,
+                    snapshotStore: snapshotStore,
+                    agentCatalog: agentCatalog,
+                    runtimeConfig: config?.effective,
+                    runtimeHooks: runtimeHooks
+                ).run(task: task)
+            },
+            loadModels: { currentSettings, progressReporter in
+                let resolvedController = await controller.resolve()
+                let runtime = RuntimeConfigMapper.resolve(
+                    config: config?.effective,
+                    settings: currentSettings,
+                    resourceBudget: ResourceBudget.resolved(for: currentSettings.resourceProfile))
+                let runtimeSettings = runtime.settings
+                let errors = runtimeSettings.validationErrors()
+                guard errors.isEmpty else { throw AppRuntimeError.invalidModelSettings(errors) }
+                let singleAgentMode = Self.usesSingleAgentMode(runtimeSettings)
+                let orchestratorModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["build", "plan"], fallback: runtimeSettings.orchestratorModelID)
+                let utilityModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["general"], fallback: runtimeSettings.utilityModelID)
+                let singleModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["general", "build"], fallback: runtimeSettings.orchestratorModelID)
+                await resolvedController.unload(role: .orchestrator)
+                await resolvedController.unload(role: .utility)
+                await resolvedController.unload(role: .embeddings)
+                if singleAgentMode {
+                    try await resolvedController.loadModel(
+                        id: singleModelID,
+                        role: .orchestrator,
+                        quantization: runtimeSettings.orchestratorQuantization,
+                        toolCallFormat: runtimeSettings.toolCallFormat,
+                        progressHandler: progressReporter)
+                    return
+                }
+                try await resolvedController.loadModel(
+                    id: orchestratorModelID,
+                    role: .orchestrator,
+                    quantization: runtimeSettings.orchestratorQuantization,
+                    toolCallFormat: runtimeSettings.toolCallFormat,
+                    progressHandler: progressReporter)
+                try await resolvedController.loadModel(
+                    id: utilityModelID,
+                    role: .utility,
+                    quantization: runtimeSettings.utilityQuantization,
+                    toolCallFormat: runtimeSettings.toolCallFormat,
+                    progressHandler: progressReporter)
+                let embeddingID = runtimeSettings.embeddingsModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !embeddingID.isEmpty {
+                    try await resolvedController.loadModel(
+                        id: embeddingID,
+                        role: .embeddings,
+                        quantization: runtimeSettings.embeddingsQuantization,
+                        progressHandler: progressReporter)
+                    await Self.backfillEmbeddings(
+                        root: root,
+                        scanner: scanner,
+                        previewLoader: previewLoader,
+                        controller: resolvedController,
+                        store: store,
+                        budget: budget,
+                        metricsRecorder: metricsRecorder)
+                }
+            },
+            unloadModels: {
+                await controller.unloadAll()
+            },
+            memoryPolicy: {
+                await controller.memoryPolicyState()
+            })
+    }
+
+    private static func makeAgent(
+        root: URL,
+        store: any WorkspaceIndexStore,
+        controller: InferenceController,
+        settings: ModelSettingsViewState,
+        metricsRecorder: MetricsRecorder,
+        includesWorkspaceContext: Bool = true,
+        advertisesTools: Bool = true,
+        snapshotStore: WorkspaceSnapshotStore? = nil,
+        agentCatalog: AgentCatalog = .default,
+        runtimeConfig: InterlessConfig? = nil,
+        runtimeHooks: ToolRuntimeHooks? = nil
+    ) async -> AgentOrchestrator {
+        let budget = ResourceBudget.resolved(for: settings.resourceProfile)
+        let runtime = RuntimeConfigMapper.resolve(
+            config: runtimeConfig,
+            settings: settings,
+            resourceBudget: budget)
+        let runtimeSettings = runtime.settings
+        let singleAgentMode = usesSingleAgentMode(runtimeSettings)
+        let policy = runtime.toolPolicy
+        let toolLoop = includesWorkspaceContext
+            ? (try? ToolExecutionLoop(
+                root: root,
+                policy: policy,
+                mutationRecorder: mutationRecorder(snapshotStore: snapshotStore),
+                managedOutputStore: ManagedToolOutputStore(maxBytesPerStream: policy.maxOutputBytes),
+                permissionAuthorizer: runtimeHooks?.permissionAuthorizer,
+                settlementHandlers: runtimeHooks?.settlementHandlers ?? .empty))
+            : nil
+        let registry = WorkspaceToolRegistry(policy: policy, advertisesTools: advertisesTools)
+        let loopPolicy = AgentLoopPolicy(maxToolIterations: runtimeSettings.maxToolIterations)
+        let contextBuilder = ContextBuilder(
+            searchProvider: includesWorkspaceContext ? WorkspaceIndexSearchProvider(store: store) : nil,
+            budget: budget,
+            metrics: metricsRecorder)
+        let orchestratorAgent = OrchestratorAgent(
+            model: controller,
+            toolLoop: toolLoop,
+            toolRegistry: registry,
+            loopPolicy: loopPolicy,
+            resourceBudget: budget,
+            systemPrompt: singleAgentMode
+                ? agentCatalog.systemPrompt(agentID: "general", fallback: "You are the local chat agent. Answer directly, use tools only when useful, and keep memory use bounded.")
+                : agentCatalog.systemPrompt(agentID: "build", fallback: "You are the orchestrator agent. Reason about architecture, planning, refactors, and multi-file changes. Be precise and actionable."),
+            agentCatalog: agentCatalog,
+            defaultAgentID: singleAgentMode ? "general" : "build")
+        let utilityAgent = UtilityAgent(
+            model: controller,
+            toolLoop: toolLoop,
+            toolRegistry: registry,
+            loopPolicy: loopPolicy,
+            resourceBudget: budget,
+            systemPrompt: agentCatalog.systemPrompt(agentID: "general", fallback: "You are the utility agent. Prefer concise answers for search, lint, summaries, tests, and lightweight code analysis."),
+            agentCatalog: agentCatalog,
+            defaultAgentID: "general")
+        let routedUtilityAgent: any StreamingAgent = singleAgentMode ? orchestratorAgent : utilityAgent
+        return AgentOrchestrator(
+            orchestrator: orchestratorAgent,
+            utility: routedUtilityAgent,
+            contextBuilder: contextBuilder,
+            toolLoop: toolLoop,
+            router: AgentRouter(forcedRoute: singleAgentMode ? .orchestrator : nil, catalog: agentCatalog))
+    }
+
+    private static func agentModelID(agentCatalog: AgentCatalog, agentIDs: [String], fallback: String) -> String {
+        for agentID in agentIDs {
+            if let modelID = agentCatalog.modelID(agentID: agentID) {
+                return modelID
+            }
+        }
+        return fallback
+    }
+
+    private static func mutationRecorder(
+        snapshotStore: WorkspaceSnapshotStore?
+    ) -> ToolExecutionLoop.MutationRecorder? {
+        guard let snapshotStore else { return nil }
+        return { paths, reason in
+            let filtered = paths.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            guard !filtered.isEmpty else { return nil }
+            let snapshot = try await snapshotStore.createSnapshot(paths: filtered, reason: reason)
+            return snapshot.id.uuidString
+        }
+    }
+
+    private static func isPlainChatTask(_ task: AgentTask) -> Bool {
+        task.observations.contains("interless.mode=plainChat")
+    }
+
+    private static func usesSingleAgentMode(_ settings: ModelSettingsViewState) -> Bool {
+        settings.usesSingleAgentMode()
+    }
+
+    private static func mergeSearchHits(
+        lexical: [SearchHit],
+        semantic: [SearchHit],
+        limit: Int
+    ) -> [SearchHit] {
+        var byPath: [String: SearchHit] = [:]
+        for hit in lexical {
+            byPath[hit.relativePath] = hit
+        }
+        for hit in semantic {
+            if var existing = byPath[hit.relativePath] {
+                existing.score = min(existing.score, hit.score)
+                existing.snippet = existing.snippet ?? hit.snippet
+                byPath[hit.relativePath] = existing
+            } else {
+                byPath[hit.relativePath] = hit
+            }
+        }
+        return byPath.values
+            .sorted { lhs, rhs in
+                if lhs.score == rhs.score { return lhs.relativePath < rhs.relativePath }
+                return lhs.score < rhs.score
+            }
+            .prefix(max(0, limit))
+            .map { $0 }
+    }
+
+    private static func backfillEmbeddings(
+        root: URL,
+        scanner: FileSystemScanner,
+        previewLoader: SafeFilePreviewLoader,
+        controller: InferenceController,
+        store: any WorkspaceIndexStore,
+        budget: ResourceBudget,
+        metricsRecorder: MetricsRecorder
+    ) async {
+        do {
+            let stream = try await scanner.scan(root: root)
+            var batch: [(path: String, text: String)] = []
+            var processed = 0
+            for await entry in stream where !entry.isDirectory {
+                guard !Task.isCancelled else { return }
+                guard processed < budget.fileTreePathLimit else { break }
+                guard let preview = try? await previewLoader.preview(root: root, relativePath: entry.relativePath),
+                      preview.kind == .text,
+                      !preview.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    continue
+                }
+                let text = String(preview.text.prefix(max(budget.maxSnippetCharacters * 2, budget.maxSnippetCharacters)))
+                batch.append((entry.relativePath, "search_document: \(entry.relativePath)\n\(text)"))
+                processed += 1
+                if batch.count >= 8 {
+                    guard !Task.isCancelled else { return }
+                    await embedBatch(batch, controller: controller, store: store, metricsRecorder: metricsRecorder)
+                    batch.removeAll(keepingCapacity: true)
+                }
+            }
+            if !batch.isEmpty, !Task.isCancelled {
+                await embedBatch(batch, controller: controller, store: store, metricsRecorder: metricsRecorder)
+            }
+        } catch {
+            await metricsRecorder.record(.init(
+                kind: .failureCount,
+                unit: .count,
+                value: 1,
+                metadata: ["source": "embeddingBackfill"]))
+        }
+    }
+
+    private static func embedBatch(
+        _ batch: [(path: String, text: String)],
+        controller: InferenceController,
+        store: any WorkspaceIndexStore,
+        metricsRecorder: MetricsRecorder
+    ) async {
+        guard !Task.isCancelled else { return }
+        do {
+            let vectors = try await controller.embed(texts: batch.map(\.text))
+            guard !Task.isCancelled else { return }
+            for (item, vector) in zip(batch, vectors) {
+                guard !Task.isCancelled else { return }
+                try await store.upsertEmbedding(path: item.path, vector: vector)
+                await metricsRecorder.record(.init(
+                    kind: .contextCharacters,
+                    unit: .count,
+                    value: Double(item.text.count),
+                    metadata: ["source": "embeddingBackfill"]))
+            }
+        } catch {
+            await metricsRecorder.record(.init(
+                kind: .failureCount,
+                unit: .count,
+                value: 1,
+                metadata: ["source": "embeddingBackfill"]))
+        }
+    }
+}
+
+private actor LazyInferenceController {
+    private let gpuCacheLimitBytes: Int?
+    private let resourceProfile: ResourceProfile
+    private let memoryCoordinator: MemoryBudgetCoordinator
+    private var controller: InferenceController?
+
+    init(
+        gpuCacheLimitBytes: Int? = nil,
+        resourceProfile: ResourceProfile,
+        memoryCoordinator: MemoryBudgetCoordinator
+    ) {
+        self.gpuCacheLimitBytes = gpuCacheLimitBytes
+        self.resourceProfile = resourceProfile
+        self.memoryCoordinator = memoryCoordinator
+    }
+
+    func resolve() async -> InferenceController {
+        if let controller {
+            return controller
+        }
+        let newController = await EngineBootstrap.liveController(
+            gpuCacheLimitBytes: gpuCacheLimitBytes,
+            resourceProfile: resourceProfile,
+            memoryCoordinator: memoryCoordinator)
+        controller = newController
+        return newController
+    }
+
+    func loadedRoles() async -> Set<ModelRole> {
+        guard let controller else { return [] }
+        return await controller.loadedRoles
+    }
+
+    func embed(texts: [String]) async throws -> [EmbeddingVector] {
+        guard let controller else { return [] }
+        return try await controller.embed(texts: texts)
+    }
+
+    func unloadAll() async {
+        guard let controller else { return }
+        await controller.unload(role: .orchestrator)
+        await controller.unload(role: .utility)
+        await controller.unload(role: .embeddings)
+    }
+
+    func memoryPolicyState() async -> MemoryPolicyState {
+        guard let controller else {
+            return await memoryCoordinator.currentState()
+        }
+        return await controller.memoryPolicyState()
+    }
+}

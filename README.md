@@ -15,9 +15,7 @@ manual MLX model loading/downloading, workspace indexing, bounded tools, patch
 review, and local diagnostics.
 
 The implementation is still in active migration. Some configured surfaces exist
-as native foundations but are not yet full end-to-end product features. See
-[ARCHITECTURE-v2.md](ARCHITECTURE-v2.md) for the migration rules and long-term
-architecture.
+as native foundations but are not yet full end-to-end product features.
 
 ## Quick Start
 
@@ -34,7 +32,7 @@ open .build/app/Interless.app
 
 In the app:
 
-1. Open Settings -> Providers.
+1. Open Settings -> Model & Context.
 2. Paste `mlx-community/gemma-2-2b-it-4bit` or
    `mlx-community/Llama-3.2-1B-Instruct-4bit` as the chat model ID.
 3. Choose `q4` quantization.
@@ -115,13 +113,14 @@ BUILD_SYSTEM=swiftpm SKIP_SIGN=1 ./scripts/package-app.sh
 
 1. Open Interless.
 2. Open Settings.
-3. Go to Providers.
+3. Go to Model & Context.
 4. Paste a Hugging Face MLX model ID into the model field.
 5. Optionally save a Hugging Face token in the Keychain if the model requires
    authentication.
 6. Press Load. Models are not downloaded or loaded automatically.
 7. Use Chat mode for plain local chat, or Code mode after opening a workspace.
-8. Go to Model & Context to set answer-token and context-window limits.
+8. Use the Chat/Code selector in Model & Context to set separate answer-token
+   and context-window limits.
 9. Keep write/process permissions disabled until you intentionally need tools
    that can mutate files or run workspace commands.
 
@@ -164,11 +163,10 @@ settings behind them:
 |---|---|
 | Appearance | Native UI density and visual preferences that are implemented. |
 | Chat | Chat rendering, stream display, diff presentation, and tool-card defaults. |
-| Model & Context | Chat max answer tokens, Code max answer tokens, max context window, and resource profile. |
+| Model & Context | Local MLX model IDs, quantization, Hugging Face token, load/unload/download, Chat/Code max answer tokens, Chat/Code context windows, and resource profile. |
 | Sessions | Local durable session persistence and session counts. |
 | Behavior | Write/process permissions, policy count, and max tool iterations. |
 | MCP | Configured MCP metadata/status. Live MCP tools are not enabled yet. |
-| Providers | Local MLX model IDs, quantization, Hugging Face token, load/unload/download. |
 | Usage | Health, diagnostics, metrics, recovery, and local status. |
 
 Token and context settings use `Automatic` when set to `0`.
@@ -177,7 +175,8 @@ Token and context settings use `Automatic` when set to `0`.
 |---|---:|---|
 | Chat max answer | 128-32,768 tokens | Used for plain Chat mode. |
 | Code max answer | 128-32,768 tokens | Used for workspace Code mode. |
-| Max context window | 1,024-131,072 tokens | The selected resource profile still applies as a safety cap. |
+| Chat max context window | 1,024-131,072 tokens | Used for plain Chat mode; the resource profile still applies as a safety cap. |
+| Code max context window | 1,024-131,072 tokens | Used for workspace Code mode; the resource profile still applies as a safety cap. |
 
 Reasoning-capable models can consume much of the answer budget inside a thinking
 trace. If a response ends before the final answer, either increase the max
@@ -194,7 +193,7 @@ answer-token setting or choose Reasoning: None.
 - Session list with selection, rename, delete, and mode separation.
 - Compact OpenChamber-inspired workspace layout.
 - Settings modal with Appearance, Chat, Model & Context, Sessions, Behavior,
-  MCP status, Providers, and Usage.
+  MCP status, and Usage.
 - Right inspector is a Code-mode surface and stays closed by default.
 - Local health, recovery, metrics, event replay, and redacted diagnostics export.
 
