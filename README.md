@@ -22,7 +22,7 @@ as native foundations but are not yet full end-to-end product features.
 For a first local test on Apple Silicon:
 
 ```sh
-git clone <repo-url> interless
+git clone https://github.com/JeromeDassy/interless.git interless
 cd interless
 swift build
 ./scripts/test.sh
@@ -78,7 +78,7 @@ Metal component download after Xcode first launch completes.
 Clone the repo and build the app:
 
 ```sh
-git clone <repo-url> interless
+git clone https://github.com/JeromeDassy/interless.git interless
 cd interless
 swift build
 ```
