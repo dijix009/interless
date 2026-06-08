@@ -29,6 +29,7 @@ public struct WorkspaceEnvironment: Sendable {
     public var gitStatus: @Sendable () async -> GitStatus
     public var gitDiff: @Sendable (_ path: String?) async throws -> String
     public var runAgent: @Sendable (_ task: AgentTask, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async -> AsyncThrowingStream<AgentEvent, Error>
+    public var embedTexts: @Sendable (_ texts: [String]) async throws -> [EmbeddingVector]?
     public var loadModels: @Sendable (_ settings: ModelSettingsViewState, _ progressReporter: ModelLoadProgressReporter?) async throws -> Void
     public var unloadModels: @Sendable () async -> Void
     public var memoryPolicy: @Sendable () async -> MemoryPolicyState
@@ -43,6 +44,7 @@ public struct WorkspaceEnvironment: Sendable {
         gitStatus: @escaping @Sendable () async -> GitStatus,
         gitDiff: @escaping @Sendable (_ path: String?) async throws -> String,
         runAgent: @escaping @Sendable (_ task: AgentTask, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async -> AsyncThrowingStream<AgentEvent, Error>,
+        embedTexts: @escaping @Sendable (_ texts: [String]) async throws -> [EmbeddingVector]? = { _ in nil },
         loadModels: @escaping @Sendable (_ settings: ModelSettingsViewState, _ progressReporter: ModelLoadProgressReporter?) async throws -> Void,
         unloadModels: @escaping @Sendable () async -> Void,
         memoryPolicy: @escaping @Sendable () async -> MemoryPolicyState = {
@@ -58,6 +60,7 @@ public struct WorkspaceEnvironment: Sendable {
         self.gitStatus = gitStatus
         self.gitDiff = gitDiff
         self.runAgent = runAgent
+        self.embedTexts = embedTexts
         self.loadModels = loadModels
         self.unloadModels = unloadModels
         self.memoryPolicy = memoryPolicy
@@ -186,6 +189,12 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                     runtimeConfig: config?.effective,
                     runtimeHooks: runtimeHooks
                 ).run(task: task)
+            },
+            embedTexts: { texts in
+                guard !texts.isEmpty else { return [] }
+                let resolvedController = await controller.resolve()
+                guard await resolvedController.loadedRoles.contains(.embeddings) else { return nil }
+                return try await resolvedController.embed(texts: texts)
             },
             loadModels: { currentSettings, progressReporter in
                 let resolvedController = await controller.resolve()

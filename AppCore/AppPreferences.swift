@@ -31,6 +31,8 @@ public final class AppPreferences {
         static let maxContextWindowTokens = "maxContextWindowTokens"
         static let plainChatMaxContextWindowTokens = "plainChatMaxContextWindowTokens"
         static let codeChatMaxContextWindowTokens = "codeChatMaxContextWindowTokens"
+        static let plainChatContextMode = "plainChatContextMode"
+        static let codeChatContextMode = "codeChatContextMode"
     }
 
     private let defaults: UserDefaults
@@ -146,7 +148,9 @@ public final class AppPreferences {
                 codeChatMaxAnswerTokens: defaults.integer(forKey: Key.codeChatMaxAnswerTokens),
                 maxContextWindowTokens: defaults.integer(forKey: Key.maxContextWindowTokens),
                 plainChatMaxContextWindowTokens: optionalInteger(forKey: Key.plainChatMaxContextWindowTokens),
-                codeChatMaxContextWindowTokens: optionalInteger(forKey: Key.codeChatMaxContextWindowTokens))
+                codeChatMaxContextWindowTokens: optionalInteger(forKey: Key.codeChatMaxContextWindowTokens),
+                plainChatContextMode: defaults.string(forKey: Key.plainChatContextMode).flatMap(ConversationContextMode.init(rawValue:)) ?? .simple,
+                codeChatContextMode: defaults.string(forKey: Key.codeChatContextMode).flatMap(ConversationContextMode.init(rawValue:)) ?? .smart)
         }
         set {
             let normalized = newValue.normalized()
@@ -155,6 +159,8 @@ public final class AppPreferences {
             defaults.set(normalized.maxContextWindowTokens, forKey: Key.maxContextWindowTokens)
             defaults.set(normalized.plainChatMaxContextWindowTokens, forKey: Key.plainChatMaxContextWindowTokens)
             defaults.set(normalized.codeChatMaxContextWindowTokens, forKey: Key.codeChatMaxContextWindowTokens)
+            defaults.set(normalized.plainChatContextMode.rawValue, forKey: Key.plainChatContextMode)
+            defaults.set(normalized.codeChatContextMode.rawValue, forKey: Key.codeChatContextMode)
         }
     }
 

@@ -21,6 +21,8 @@ struct AppCoreTests {
         #expect(!preferences.modelSettings.allowWrites)
         #expect(preferences.reasoningEffort == .low)
         #expect(preferences.modelContextSettings == ModelContextSettingsViewState())
+        #expect(preferences.modelContextSettings.plainChatContextMode == .simple)
+        #expect(preferences.modelContextSettings.codeChatContextMode == .smart)
 
         var settings = ModelSettingsViewState()
         settings.orchestratorModelID = "orch"
@@ -40,7 +42,9 @@ struct AppCoreTests {
             plainChatMaxAnswerTokens: 768,
             codeChatMaxAnswerTokens: 1_536,
             plainChatMaxContextWindowTokens: 8_192,
-            codeChatMaxContextWindowTokens: 16_384)
+            codeChatMaxContextWindowTokens: 16_384,
+            plainChatContextMode: .smart,
+            codeChatContextMode: .simple)
 
         #expect(preferences.lastWorkspacePath == "/tmp/work")
         #expect(!preferences.restoreLastWorkspaceOnLaunch)
@@ -58,6 +62,8 @@ struct AppCoreTests {
         #expect(preferences.modelContextSettings.codeChatMaxAnswerTokens == 1_536)
         #expect(preferences.modelContextSettings.plainChatMaxContextWindowTokens == 8_192)
         #expect(preferences.modelContextSettings.codeChatMaxContextWindowTokens == 16_384)
+        #expect(preferences.modelContextSettings.plainChatContextMode == .smart)
+        #expect(preferences.modelContextSettings.codeChatContextMode == .simple)
     }
 
     @Test func openingWorkspaceDoesNotAutoLoadModels() async {
@@ -378,7 +384,8 @@ struct AppCoreTests {
         }
 
         let task = try #require(await factory.runTasks.last)
-        let transcript = try #require(task.observations.first { $0.contains("Previous conversation") })
+        #expect(task.observations.contains("Conversation context mode: simple"))
+        let transcript = try #require(task.observations.first { $0.contains("Relevant prior conversation") })
         #expect(transcript.contains("User: Tell me a story about Priscilla."))
         #expect(transcript.contains("Assistant: answer"))
     }
@@ -400,7 +407,30 @@ struct AppCoreTests {
         }
 
         let task = try #require(await factory.runTasks.last)
-        #expect(!task.observations.contains { $0.contains("Previous conversation") })
+        #expect(task.observations.contains("Conversation context mode: simple"))
+        #expect(!task.observations.contains { $0.contains("Relevant prior conversation") })
+    }
+
+    @Test func plainChatComplexNewTopicDoesNotCarryPriorTurns() async throws {
+        let factory = FakeAppDependencyFactory()
+        let session = WorkspaceSessionModel(preferences: AppPreferences(defaults: testDefaults()), factory: factory)
+
+        await session.runPlainChatPrompt("Tell me a story about Finley.")
+        for _ in 0..<100 {
+            if await factory.runTasks.count >= 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        await session.runPlainChatPrompt("Write a Python script that sorts CSV files.")
+        for _ in 0..<100 {
+            if await factory.runTasks.count >= 2 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let task = try #require(await factory.runTasks.last)
+        #expect(task.observations.contains("Conversation context mode: simple"))
+        #expect(!task.observations.contains { $0.contains("Relevant prior conversation") })
+        #expect(!task.observations.contains { $0.contains("Finley") })
     }
 
     @Test func codeChatStandaloneGreetingDoesNotCarryPriorTurns() async throws {
@@ -423,7 +453,8 @@ struct AppCoreTests {
         }
 
         let task = try #require(await factory.runTasks.last)
-        #expect(!task.observations.contains { $0.contains("Previous conversation") })
+        #expect(task.observations.contains("Conversation context mode: smartDegraded"))
+        #expect(!task.observations.contains { $0.contains("Relevant prior conversation") })
     }
 
     @Test func contextWindowUsageReflectsDraftContent() {
