@@ -519,6 +519,31 @@ enum AppSchema {
                 try db.execute(sql: "ALTER TABLE session_message_part ADD COLUMN reasoningEffort TEXT")
             }
         }
+        migrator.registerMigration("v7_session_context_memory") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS session_message_embedding (
+                    partID TEXT PRIMARY KEY NOT NULL REFERENCES session_message_part(id) ON DELETE CASCADE,
+                    sessionID TEXT NOT NULL REFERENCES native_session(id) ON DELETE CASCADE,
+                    dimensions INTEGER NOT NULL,
+                    vector BLOB NOT NULL,
+                    updatedAt REAL NOT NULL
+                )
+                """)
+            try db.execute(sql: "CREATE INDEX IF NOT EXISTS idx_session_message_embedding_session ON session_message_embedding(sessionID, updatedAt)")
+            let compactionColumns = try db.columns(in: "session_compaction").map(\.name)
+            if !compactionColumns.contains("coveredMessagePartIDsJSON") {
+                try db.execute(sql: "ALTER TABLE session_compaction ADD COLUMN coveredMessagePartIDsJSON TEXT")
+            }
+            if !compactionColumns.contains("coveredThrough") {
+                try db.execute(sql: "ALTER TABLE session_compaction ADD COLUMN coveredThrough REAL")
+            }
+            if !compactionColumns.contains("sourceMode") {
+                try db.execute(sql: "ALTER TABLE session_compaction ADD COLUMN sourceMode TEXT")
+            }
+            if !compactionColumns.contains("estimatedTokens") {
+                try db.execute(sql: "ALTER TABLE session_compaction ADD COLUMN estimatedTokens INTEGER NOT NULL DEFAULT 0")
+            }
+        }
         return migrator
     }
 }

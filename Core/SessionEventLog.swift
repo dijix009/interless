@@ -144,19 +144,31 @@ public struct SessionCompactionCheckpoint: Sendable, Equatable, Codable, Identif
     public var summary: String
     public var recentContext: String
     public var createdAt: Date
+    public var coveredMessagePartIDs: [UUID]
+    public var coveredThrough: Date?
+    public var sourceMode: ConversationContextMode?
+    public var estimatedTokens: Int
 
     public init(
         id: UUID = UUID(),
         sessionID: UUID,
         summary: String,
         recentContext: String,
-        createdAt: Date = Date()
+        createdAt: Date = Date(),
+        coveredMessagePartIDs: [UUID] = [],
+        coveredThrough: Date? = nil,
+        sourceMode: ConversationContextMode? = nil,
+        estimatedTokens: Int = 0
     ) {
         self.id = id
         self.sessionID = sessionID
         self.summary = summary
         self.recentContext = recentContext
         self.createdAt = createdAt
+        self.coveredMessagePartIDs = coveredMessagePartIDs
+        self.coveredThrough = coveredThrough
+        self.sourceMode = sourceMode
+        self.estimatedTokens = estimatedTokens
     }
 }
 
@@ -236,6 +248,9 @@ public protocol SessionRuntimeStore: Sendable {
     func markInputPromoted(id: UUID, promotedAt: Date) async throws
     func appendMessagePart(_ part: SessionMessagePart) async throws
     func messageParts(sessionID: UUID, limit: Int) async throws -> [SessionMessagePart]
+    func upsertMessageEmbedding(_ embedding: SessionMessageEmbedding) async throws
+    func messageEmbeddings(sessionID: UUID, limit: Int) async throws -> [SessionMessageEmbedding]
+    func messageEmbedding(partID: UUID) async throws -> SessionMessageEmbedding?
     func replaceTodos(_ todos: [SessionTodo], sessionID: UUID) async throws
     func todos(sessionID: UUID) async throws -> [SessionTodo]
     func saveCompaction(_ checkpoint: SessionCompactionCheckpoint) async throws

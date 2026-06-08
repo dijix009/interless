@@ -34,6 +34,8 @@ private actor InMemorySessionRuntimeStore: SessionRuntimeStore {
     private var sessions: [UUID: SessionRecord] = [:]
     private var inputs: [UUID: SessionInputRecord] = [:]
     private var parts: [SessionMessagePart] = []
+    private var embeddings: [UUID: SessionMessageEmbedding] = [:]
+    private var compactions: [UUID: SessionCompactionCheckpoint] = [:]
     private var eventsBySession: [UUID: [SessionEvent]] = [:]
 
     func createSession(id: UUID?, workspacePath: String?, title: String) async throws -> SessionRecord {
@@ -61,6 +63,8 @@ private actor InMemorySessionRuntimeStore: SessionRuntimeStore {
         guard sessions.removeValue(forKey: id) != nil else { throw SessionRuntimeError.sessionNotFound(id) }
         inputs = inputs.filter { $0.value.sessionID != id }
         parts.removeAll { $0.sessionID == id }
+        embeddings = embeddings.filter { $0.value.sessionID != id }
+        compactions[id] = nil
         eventsBySession[id] = nil
     }
 
@@ -90,10 +94,27 @@ private actor InMemorySessionRuntimeStore: SessionRuntimeStore {
         Array(parts.filter { $0.sessionID == sessionID }.prefix(limit))
     }
 
+    func upsertMessageEmbedding(_ embedding: SessionMessageEmbedding) async throws {
+        embeddings[embedding.partID] = embedding
+    }
+
+    func messageEmbeddings(sessionID: UUID, limit: Int) async throws -> [SessionMessageEmbedding] {
+        Array(embeddings.values
+            .filter { $0.sessionID == sessionID }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(limit))
+    }
+
+    func messageEmbedding(partID: UUID) async throws -> SessionMessageEmbedding? {
+        embeddings[partID]
+    }
+
     func replaceTodos(_ todos: [SessionTodo], sessionID: UUID) async throws {}
     func todos(sessionID: UUID) async throws -> [SessionTodo] { [] }
-    func saveCompaction(_ checkpoint: SessionCompactionCheckpoint) async throws {}
-    func latestCompaction(sessionID: UUID) async throws -> SessionCompactionCheckpoint? { nil }
+    func saveCompaction(_ checkpoint: SessionCompactionCheckpoint) async throws {
+        compactions[checkpoint.sessionID] = checkpoint
+    }
+    func latestCompaction(sessionID: UUID) async throws -> SessionCompactionCheckpoint? { compactions[sessionID] }
 
     func appendEvent(_ event: SessionEvent) async throws -> SessionEvent {
         var saved = event

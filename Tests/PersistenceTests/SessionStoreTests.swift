@@ -37,7 +37,9 @@ struct SessionStoreTests {
         let session = try await store.createSession(id: nil, workspacePath: nil, title: "Chat")
         let input = try await store.admitInput(SessionInputRecord(sessionID: session.id, prompt: "work"))
         let messageID = UUID()
+        let partID = UUID()
         try await store.appendMessagePart(SessionMessagePart(
+            id: partID,
             sessionID: session.id,
             messageID: messageID,
             role: .user,
@@ -50,14 +52,30 @@ struct SessionStoreTests {
         try await store.saveCompaction(SessionCompactionCheckpoint(
             sessionID: session.id,
             summary: "summary",
-            recentContext: "recent"))
+            recentContext: "recent",
+            coveredMessagePartIDs: [partID],
+            coveredThrough: Date(timeIntervalSince1970: 3),
+            sourceMode: .smart,
+            estimatedTokens: 12))
 
         let parts = try await store.messageParts(sessionID: session.id, limit: 10)
         #expect(parts.map(\.messageID) == [messageID])
         #expect(parts.first?.modelID == "Qwen/Qwen3-4B-MLX-4bit")
         #expect(parts.first?.reasoningEffort == .low)
+        try await store.upsertMessageEmbedding(SessionMessageEmbedding(
+            sessionID: session.id,
+            partID: partID,
+            vector: EmbeddingVector([1, 0, 0]),
+            updatedAt: Date(timeIntervalSince1970: 5)))
+        #expect(try await store.messageEmbedding(partID: partID)?.vector.cosineSimilarity(to: EmbeddingVector([1, 0, 0])) ?? 0 > 0.99)
+        #expect(try await store.messageEmbeddings(sessionID: session.id, limit: 10).map(\.partID) == [partID])
         #expect(try await store.todos(sessionID: session.id).map(\.title) == ["Inspect"])
-        #expect(try await store.latestCompaction(sessionID: session.id)?.summary == "summary")
+        let checkpoint = try #require(try await store.latestCompaction(sessionID: session.id))
+        #expect(checkpoint.summary == "summary")
+        #expect(checkpoint.coveredMessagePartIDs == [partID])
+        #expect(checkpoint.coveredThrough == Date(timeIntervalSince1970: 3))
+        #expect(checkpoint.sourceMode == .smart)
+        #expect(checkpoint.estimatedTokens == 12)
 
         try await store.interrupt(sessionID: session.id)
         #expect(try await store.session(id: session.id)?.isInterrupted == true)

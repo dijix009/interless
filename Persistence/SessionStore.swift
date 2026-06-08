@@ -174,6 +174,52 @@ public final class GRDBSessionStore: SessionRuntimeStore {
         }
     }
 
+    public func upsertMessageEmbedding(_ embedding: SessionMessageEmbedding) async throws {
+        guard !embedding.vector.isEmpty else { return }
+        let data = Self.encode(embedding.vector.values)
+        try await dbWriter.write { db in
+            try db.execute(sql: """
+                INSERT INTO session_message_embedding (
+                    partID, sessionID, dimensions, vector, updatedAt
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(partID) DO UPDATE SET
+                    sessionID = excluded.sessionID,
+                    dimensions = excluded.dimensions,
+                    vector = excluded.vector,
+                    updatedAt = excluded.updatedAt
+                """, arguments: [
+                    embedding.partID.uuidString,
+                    embedding.sessionID.uuidString,
+                    embedding.vector.dimensions,
+                    data,
+                    embedding.updatedAt.timeIntervalSince1970,
+                ])
+        }
+    }
+
+    public func messageEmbeddings(sessionID: UUID, limit: Int) async throws -> [SessionMessageEmbedding] {
+        try await dbWriter.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT * FROM session_message_embedding
+                WHERE sessionID = ?
+                ORDER BY updatedAt DESC
+                LIMIT ?
+                """, arguments: [sessionID.uuidString, max(0, limit)])
+                .compactMap(Self.messageEmbedding)
+        }
+    }
+
+    public func messageEmbedding(partID: UUID) async throws -> SessionMessageEmbedding? {
+        try await dbWriter.read { db in
+            try Row.fetchOne(db, sql: """
+                SELECT * FROM session_message_embedding
+                WHERE partID = ?
+                LIMIT 1
+                """, arguments: [partID.uuidString])
+                .flatMap(Self.messageEmbedding)
+        }
+    }
+
     public func replaceTodos(_ todos: [SessionTodo], sessionID: UUID) async throws {
         try await dbWriter.write { db in
             try db.execute(sql: "DELETE FROM session_todo WHERE sessionID = ?", arguments: [sessionID.uuidString])
@@ -205,17 +251,23 @@ public final class GRDBSessionStore: SessionRuntimeStore {
     }
 
     public func saveCompaction(_ checkpoint: SessionCompactionCheckpoint) async throws {
+        let coveredIDsJSON = try String(data: encoder.encode(checkpoint.coveredMessagePartIDs.map(\.uuidString)), encoding: .utf8)
         try await dbWriter.write { db in
             try db.execute(sql: """
                 INSERT INTO session_compaction (
-                    id, sessionID, summary, recentContext, createdAt
-                ) VALUES (?, ?, ?, ?, ?)
+                    id, sessionID, summary, recentContext, createdAt,
+                    coveredMessagePartIDsJSON, coveredThrough, sourceMode, estimatedTokens
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, arguments: [
                     checkpoint.id.uuidString,
                     checkpoint.sessionID.uuidString,
                     checkpoint.summary,
                     checkpoint.recentContext,
                     checkpoint.createdAt.timeIntervalSince1970,
+                    coveredIDsJSON,
+                    checkpoint.coveredThrough?.timeIntervalSince1970,
+                    checkpoint.sourceMode?.rawValue,
+                    checkpoint.estimatedTokens,
                 ])
             try Self.touchSession(db, id: checkpoint.sessionID, updatedAt: checkpoint.createdAt)
         }
@@ -389,12 +441,40 @@ public final class GRDBSessionStore: SessionRuntimeStore {
         let summary: String = row["summary"]
         let recentContext: String = row["recentContext"]
         let createdAt: Double = row["createdAt"]
+        let coveredIDsJSON: String? = row["coveredMessagePartIDsJSON"]
+        let coveredIDs = coveredIDsJSON
+            .flatMap { try? JSONDecoder().decode([String].self, from: Data($0.utf8)) }
+            .map { $0.compactMap(UUID.init(uuidString:)) } ?? []
+        let coveredThrough: Double? = row["coveredThrough"]
+        let sourceMode: String? = row["sourceMode"]
+        let estimatedTokens: Int = row["estimatedTokens"] ?? 0
         return SessionCompactionCheckpoint(
             id: id,
             sessionID: sessionID,
             summary: summary,
             recentContext: recentContext,
-            createdAt: Date(timeIntervalSince1970: createdAt))
+            createdAt: Date(timeIntervalSince1970: createdAt),
+            coveredMessagePartIDs: coveredIDs,
+            coveredThrough: coveredThrough.map(Date.init(timeIntervalSince1970:)),
+            sourceMode: sourceMode.flatMap(ConversationContextMode.init(rawValue:)),
+            estimatedTokens: estimatedTokens)
+    }
+
+    private static func messageEmbedding(_ row: Row) -> SessionMessageEmbedding? {
+        guard let sessionID = UUID(uuidString: row["sessionID"] as String),
+              let partID = UUID(uuidString: row["partID"] as String) else {
+            return nil
+        }
+        let dimensions: Int = row["dimensions"]
+        let data: Data = row["vector"]
+        let values = decode(data)
+        guard dimensions == values.count else { return nil }
+        let updatedAt: Double = row["updatedAt"]
+        return SessionMessageEmbedding(
+            sessionID: sessionID,
+            partID: partID,
+            vector: EmbeddingVector(values),
+            updatedAt: Date(timeIntervalSince1970: updatedAt))
     }
 
     private static func event(_ row: Row, decoder: JSONDecoder) throws -> SessionEvent? {
@@ -416,5 +496,18 @@ public final class GRDBSessionStore: SessionRuntimeStore {
             messageID: messageIDString.flatMap(UUID.init(uuidString:)),
             payload: payload,
             createdAt: Date(timeIntervalSince1970: createdAt))
+    }
+
+    private static func encode(_ values: [Float]) -> Data {
+        values.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    private static func decode(_ data: Data) -> [Float] {
+        let count = data.count / MemoryLayout<Float>.stride
+        guard count > 0 else { return [] }
+        return data.withUnsafeBytes { buffer in
+            guard let base = buffer.bindMemory(to: Float.self).baseAddress else { return [] }
+            return Array(UnsafeBufferPointer(start: base, count: count))
+        }
     }
 }

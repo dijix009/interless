@@ -633,6 +633,8 @@ public struct ModelContextSettingsViewState: Sendable, Equatable, Codable {
     public var codeChatMaxAnswerTokens: Int
     public var plainChatMaxContextWindowTokens: Int
     public var codeChatMaxContextWindowTokens: Int
+    public var plainChatContextMode: ConversationContextMode
+    public var codeChatContextMode: ConversationContextMode
 
     public var maxContextWindowTokens: Int {
         get {
@@ -652,13 +654,17 @@ public struct ModelContextSettingsViewState: Sendable, Equatable, Codable {
         codeChatMaxAnswerTokens: Int = 0,
         maxContextWindowTokens: Int = 0,
         plainChatMaxContextWindowTokens: Int? = nil,
-        codeChatMaxContextWindowTokens: Int? = nil
+        codeChatMaxContextWindowTokens: Int? = nil,
+        plainChatContextMode: ConversationContextMode = .simple,
+        codeChatContextMode: ConversationContextMode = .smart
     ) {
         let legacyContext = Self.normalizedContextTokenValue(maxContextWindowTokens)
         self.plainChatMaxAnswerTokens = Self.normalizedAnswerTokenValue(plainChatMaxAnswerTokens)
         self.codeChatMaxAnswerTokens = Self.normalizedAnswerTokenValue(codeChatMaxAnswerTokens)
         self.plainChatMaxContextWindowTokens = Self.normalizedContextTokenValue(plainChatMaxContextWindowTokens ?? legacyContext)
         self.codeChatMaxContextWindowTokens = Self.normalizedContextTokenValue(codeChatMaxContextWindowTokens ?? legacyContext)
+        self.plainChatContextMode = plainChatContextMode
+        self.codeChatContextMode = codeChatContextMode
     }
 
     public func normalized() -> ModelContextSettingsViewState {
@@ -666,7 +672,9 @@ public struct ModelContextSettingsViewState: Sendable, Equatable, Codable {
             plainChatMaxAnswerTokens: plainChatMaxAnswerTokens,
             codeChatMaxAnswerTokens: codeChatMaxAnswerTokens,
             plainChatMaxContextWindowTokens: plainChatMaxContextWindowTokens,
-            codeChatMaxContextWindowTokens: codeChatMaxContextWindowTokens)
+            codeChatMaxContextWindowTokens: codeChatMaxContextWindowTokens,
+            plainChatContextMode: plainChatContextMode,
+            codeChatContextMode: codeChatContextMode)
     }
 
     public func maxAnswerTokens(isPlainChat: Bool) -> Int? {
@@ -681,6 +689,10 @@ public struct ModelContextSettingsViewState: Sendable, Equatable, Codable {
     public func contextTokenBudgetOverride(isPlainChat: Bool) -> Int? {
         let value = isPlainChat ? plainChatMaxContextWindowTokens : codeChatMaxContextWindowTokens
         return value > 0 ? value : nil
+    }
+
+    public func conversationContextMode(isPlainChat: Bool) -> ConversationContextMode {
+        isPlainChat ? plainChatContextMode : codeChatContextMode
     }
 
     public static func displayTokenValue(_ value: Int) -> String {

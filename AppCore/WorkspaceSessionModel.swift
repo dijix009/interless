@@ -758,7 +758,6 @@ public final class WorkspaceSessionModel: ObservableObject {
         }
         let session = await prepareSessionForPrompt(promptText, workspacePath: workspaceURL?.path, mode: .code)
         let sessionID = session?.id
-        let priorTranscript = priorChatTranscriptObservation()
         await publish(.init(kind: .chat, message: "Starting agent chat"))
         let start = ContinuousClock.now
         let taskID = await taskScheduler.begin(kind: "chat", title: "Agent chat", priority: .userInitiated)
@@ -779,10 +778,13 @@ public final class WorkspaceSessionModel: ObservableObject {
             reasoningEffort: responseReasoningEffort))
         generationStats[assistantID] = MessageGenerationStats()
         await persistSessionUserPrompt(sessionID: sessionID, promptText: promptText, messageID: userID)
-        var observations = await workspaceChatObservations(environment: environment, prompt: promptText)
-        if let priorTranscript {
-            observations.insert(priorTranscript, at: 0)
-        }
+        let conversationContext = await conversationContextBundle(
+            prompt: promptText,
+            sessionID: sessionID,
+            isPlainChat: false,
+            environment: environment)
+        var observations = conversationContext.observations
+        observations.append(contentsOf: await workspaceChatObservations(environment: environment, prompt: promptText))
         observations.append(responseReasoningEffort.promptInstruction(for: responseModelID))
         let contextEpoch = await contextEpochStore.replace(
             sessionID: sessionID ?? assistantID,
@@ -809,6 +811,7 @@ public final class WorkspaceSessionModel: ObservableObject {
                 }
                 finishStreamingMessage(id: assistantID)
                 await persistSessionAssistantMessage(sessionID: sessionID, id: assistantID)
+                await compactConversationIfNeeded(sessionID: sessionID, isPlainChat: false, environment: environment)
                 await recordDuration(.inferenceLatency, start: start)
                 await taskScheduler.finish(id: taskID, status: .completed)
                 await finishRecovery(recovery, status: .completed)
@@ -850,7 +853,6 @@ public final class WorkspaceSessionModel: ObservableObject {
         }
         let session = await prepareSessionForPrompt(promptText, workspacePath: nil, mode: .chat)
         let sessionID = session?.id
-        let priorTranscript = priorChatTranscriptObservation()
         await publish(.init(kind: .chat, message: "Starting plain chat"))
         let start = ContinuousClock.now
         let taskID = await taskScheduler.begin(kind: "chat", title: "Plain chat", priority: .userInitiated)
@@ -871,10 +873,13 @@ public final class WorkspaceSessionModel: ObservableObject {
             reasoningEffort: responseReasoningEffort))
         generationStats[assistantID] = MessageGenerationStats()
         await persistSessionUserPrompt(sessionID: sessionID, promptText: promptText, messageID: userID)
-        var observations = ["interless.mode=plainChat"]
-        if let priorTranscript {
-            observations.append(priorTranscript)
-        }
+        let runtimeEnvironment = try? await modelRuntimeEnvironment()
+        var observations = await conversationContextBundle(
+            prompt: promptText,
+            sessionID: sessionID,
+            isPlainChat: true,
+            environment: runtimeEnvironment).observations
+        observations.append("interless.mode=plainChat")
         observations.append(responseReasoningEffort.promptInstruction(for: responseModelID))
         chatTask = Task {
             defer {
@@ -896,6 +901,7 @@ public final class WorkspaceSessionModel: ObservableObject {
                 }
                 finishStreamingMessage(id: assistantID)
                 await persistSessionAssistantMessage(sessionID: sessionID, id: assistantID)
+                await compactConversationIfNeeded(sessionID: sessionID, isPlainChat: true, environment: environment)
                 await recordDuration(.inferenceLatency, start: start)
                 await taskScheduler.finish(id: taskID, status: .completed)
                 await finishRecovery(recovery, status: .completed)
@@ -1701,14 +1707,9 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func estimatedContextWindowUsage() -> (label: String, fraction: Double) {
-        let budget = ResourceBudget.resolved(for: settings.resourceProfile)
-        let role: ModelRole = settings.usesSingleAgentMode() ? .orchestrator : .utility
-        let profileTokenBudget = budget.contextTokenBudget(for: role)
-            ?? budget.contextTokenBudget(for: .orchestrator)
-        let tokenBudget = [
-            modelContextSettings.contextTokenBudgetOverride,
-            profileTokenBudget,
-        ].compactMap(\.self).min() ?? 1
+        let mode = visibleConversationMode
+        let role: ModelRole = settings.usesSingleAgentMode() ? .orchestrator : (mode == .chat ? .utility : .orchestrator)
+        let tokenBudget = effectiveContextTokenCap(isPlainChat: mode == .chat, role: role)
         let tokenEstimate = estimatedContextTokens(
             messages: chatMessages,
             draft: chatDraft)
@@ -1720,25 +1721,34 @@ public final class WorkspaceSessionModel: ObservableObject {
         messages: [ChatMessageViewState],
         draft: String
     ) -> Int {
-        let transcriptCharacters = messages.reduce(0) { partial, message in
-            guard !message.isToolEvent else { return partial }
-            return partial + message.text.count
-        }
-        let draftCharacters = draft.trimmingCharacters(in: .whitespacesAndNewlines).count
-        let messageOverhead = max(1, messages.filter { !$0.isToolEvent }.count) * 8
+        let trimmedDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let transcriptCharacters = estimatedConversationContextCharacters(for: trimmedDraft)
+        let draftCharacters = trimmedDraft.count
+        let messageCount = (transcriptCharacters > 0 ? messages.filter { !$0.isToolEvent }.count : 0)
+            + (trimmedDraft.isEmpty ? 0 : 1)
+        let messageOverhead = max(0, messageCount) * 8
         return Int(ceil(Double(transcriptCharacters + draftCharacters) / 4.0)) + messageOverhead
     }
 
-    private func priorChatTranscriptObservation() -> String? {
-        let budget = ResourceBudget.resolved(for: settings.resourceProfile)
-        let limit = max(1_200, min(16_000, budget.maxContextCharacters / 2))
-        let rows = boundedPriorChatTranscriptRows(limit: limit)
-        guard !rows.isEmpty else { return nil }
-        return "Previous conversation:\n" + rows.joined(separator: "\n\n")
+    private func estimatedConversationContextCharacters(for promptText: String) -> Int {
+        let isPlainChat = visibleConversationMode == .chat
+        let mode = modelContextSettings.conversationContextMode(isPlainChat: isPlainChat)
+        guard ConversationContextBuilder.isLikelyContextDependent(promptText) || mode == .smart else { return 0 }
+        let cap = effectiveContextTokenCap(isPlainChat: isPlainChat)
+        let tokenLimit: Int
+        switch mode {
+        case .simple:
+            tokenLimit = min(1_600, max(128, cap / 5))
+        case .smart:
+            tokenLimit = isPlainChat
+                ? min(2_000, max(256, cap / 4))
+                : min(4_000, max(512, Int(Double(cap) * 0.35)))
+        }
+        return min(estimatedVisibleTranscriptCharacters(), tokenLimit * 4)
     }
 
-    private func boundedPriorChatTranscriptRows(limit: Int) -> [String] {
-        let candidates = chatMessages.compactMap { message -> String? in
+    private func estimatedVisibleTranscriptCharacters() -> Int {
+        chatMessages.compactMap { message -> String? in
             guard !message.isStreaming else { return nil }
             let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return nil }
@@ -1751,28 +1761,149 @@ public final class WorkspaceSessionModel: ObservableObject {
                 return nil
             }
         }
-        guard !candidates.isEmpty else { return [] }
+        .joined(separator: "\n\n")
+        .count
+    }
+
+    private func effectiveContextTokenCap(
+        isPlainChat: Bool,
+        role explicitRole: ModelRole? = nil
+    ) -> Int {
+        let budget = ResourceBudget.resolved(for: settings.resourceProfile)
+        let role = explicitRole ?? (settings.usesSingleAgentMode() ? .orchestrator : (isPlainChat ? .utility : .orchestrator))
+        let profileTokenBudget = budget.contextTokenBudget(for: role)
+            ?? budget.contextTokenBudget(for: .orchestrator)
+        return [
+            modelContextSettings.contextTokenBudgetOverride(isPlainChat: isPlainChat),
+            profileTokenBudget,
+        ].compactMap(\.self).min() ?? max(1, profileTokenBudget ?? 1)
+    }
+
+    private func conversationContextBundle(
+        prompt: String,
+        sessionID: UUID?,
+        isPlainChat: Bool,
+        environment: WorkspaceEnvironment?
+    ) async -> ConversationContextBundle {
+        let requestedMode = modelContextSettings.conversationContextMode(isPlainChat: isPlainChat)
+        guard let sessionStore else {
+            return transientConversationContextBundle(
+                prompt: prompt,
+                requestedMode: requestedMode,
+                isPlainChat: isPlainChat)
+        }
+        let builder = Self.conversationContextBuilder(sessionStore: sessionStore, environment: environment)
+        return await builder.build(request: ConversationContextRequest(
+            sessionID: sessionID,
+            prompt: prompt,
+            mode: requestedMode,
+            isPlainChat: isPlainChat,
+            effectiveContextTokenCap: effectiveContextTokenCap(isPlainChat: isPlainChat)))
+    }
+
+    private func transientConversationContextBundle(
+        prompt: String,
+        requestedMode: ConversationContextMode,
+        isPlainChat: Bool
+    ) -> ConversationContextBundle {
+        let effectiveMode: EffectiveConversationContextMode = requestedMode == .smart ? .smartDegraded : .simple
+        var observations = ["Conversation context mode: \(effectiveMode.rawValue)"]
+        guard ConversationContextBuilder.isLikelyContextDependent(prompt) else {
+            return ConversationContextBundle(
+                requestedMode: requestedMode,
+                effectiveMode: effectiveMode,
+                observations: observations,
+                diagnostics: ["reason": "no-session-store-standalone"])
+        }
+        let cap = effectiveContextTokenCap(isPlainChat: isPlainChat)
+        let tokenLimit = min(1_600, max(128, cap / 5))
+        let rows = boundedVisibleTranscriptRows(prompt: prompt, tokenLimit: tokenLimit)
+        if !rows.isEmpty {
+            observations.append("Relevant prior conversation (background only; ignore if unrelated to the latest request):\n"
+                + rows.joined(separator: "\n\n"))
+        }
+        return ConversationContextBundle(
+            requestedMode: requestedMode,
+            effectiveMode: effectiveMode,
+            observations: observations,
+            estimatedTokens: Int(ceil(Double(rows.joined(separator: "\n\n").count) / 4.0)),
+            diagnostics: ["reason": "no-session-store-transient"])
+    }
+
+    private func boundedVisibleTranscriptRows(prompt: String, tokenLimit: Int) -> [String] {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        var skippedCurrentUser = false
+        let candidates = chatMessages.reversed().compactMap { message -> String? in
+            guard !message.isStreaming else { return nil }
+            let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            if !skippedCurrentUser, message.role == .user, trimmed == trimmedPrompt {
+                skippedCurrentUser = true
+                return nil
+            }
+            switch message.role {
+            case .user:
+                return "User: \(trimmed)"
+            case .assistant:
+                return "Assistant: \(Self.finalMessageText(trimmed, reasoningEffort: message.reasoningEffort))"
+            default:
+                return nil
+            }
+        }
+        guard tokenLimit > 0 else { return [] }
         var selected: [String] = []
         var used = 0
-        for row in candidates.reversed() {
-            let rowLength = row.count + (selected.isEmpty ? 0 : 2)
-            if used + rowLength <= limit {
+        for row in candidates {
+            let tokens = max(1, Int(ceil(Double(row.count) / 4.0)))
+            if used + tokens <= tokenLimit {
                 selected.append(row)
-                used += rowLength
+                used += tokens
                 continue
-            }
-            if selected.isEmpty {
-                selected.append(Self.truncateFromStart(row, limit: limit))
             }
             break
         }
         return selected.reversed()
     }
 
-    private static func truncateFromStart(_ text: String, limit: Int) -> String {
-        guard text.count > limit else { return text }
-        guard limit > 20 else { return String(text.suffix(max(0, limit))) }
-        return "[truncated]\n" + String(text.suffix(limit - 12))
+    private func compactConversationIfNeeded(
+        sessionID: UUID?,
+        isPlainChat: Bool,
+        environment: WorkspaceEnvironment?
+    ) async {
+        guard let sessionStore, let sessionID else { return }
+        let mode = modelContextSettings.conversationContextMode(isPlainChat: isPlainChat)
+        guard mode == .smart else { return }
+        let builder = Self.conversationContextBuilder(sessionStore: sessionStore, environment: environment)
+        await builder.compactIfNeeded(sessionID: sessionID, mode: mode)
+    }
+
+    private nonisolated static func conversationContextBuilder(
+        sessionStore: any SessionRuntimeStore,
+        environment: WorkspaceEnvironment?
+    ) -> ConversationContextBuilder {
+        ConversationContextBuilder(
+            loadMessageParts: { sessionID, limit in
+                try await sessionStore.messageParts(sessionID: sessionID, limit: limit)
+            },
+            loadLatestCompaction: { sessionID in
+                try await sessionStore.latestCompaction(sessionID: sessionID)
+            },
+            saveCompaction: { checkpoint in
+                try await sessionStore.saveCompaction(checkpoint)
+            },
+            embedTexts: { texts in
+                guard let environment else { return nil }
+                return try await environment.embedTexts(texts)
+            },
+            loadMessageEmbeddings: { sessionID, limit in
+                try await sessionStore.messageEmbeddings(sessionID: sessionID, limit: limit)
+            },
+            loadMessageEmbedding: { partID in
+                try await sessionStore.messageEmbedding(partID: partID)
+            },
+            saveMessageEmbedding: { embedding in
+                try await sessionStore.upsertMessageEmbedding(embedding)
+            })
     }
 
     private static func formatContextUsageLabel(_ fraction: Double) -> String {
@@ -2238,18 +2369,24 @@ public final class WorkspaceSessionModel: ObservableObject {
     ) async {
         guard settings.persistPromptHistory, let sessionStore, let sessionID else { return }
         do {
-            try await sessionStore.appendMessagePart(SessionMessagePart(
+            let part = SessionMessagePart(
                 sessionID: sessionID,
                 messageID: messageID,
                 role: role,
                 kind: kind,
                 text: text,
                 modelID: modelID,
-                reasoningEffort: reasoningEffort))
+                reasoningEffort: reasoningEffort)
+            try await sessionStore.appendMessagePart(part)
             await recordSessionEvent(sessionID: sessionID, kind: .messagePartAppended, messageID: messageID, payload: [
                 "role": role.rawValue,
                 "kind": kind,
             ])
+            let currentEnvironment = environment ?? chatOnlyEnvironment
+            let builder = Self.conversationContextBuilder(sessionStore: sessionStore, environment: currentEnvironment)
+            Task.detached {
+                await builder.indexMessagePart(part)
+            }
         } catch {
             appendNotice(severity: .warning, title: "Session message not saved", message: String(describing: error))
         }

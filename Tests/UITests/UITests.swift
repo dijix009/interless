@@ -173,6 +173,8 @@ struct UITests {
 
         #expect(ModelContextSettingsViewState().maxAnswerTokens(isPlainChat: true) == nil)
         #expect(ModelContextSettingsViewState().contextTokenBudgetOverride(isPlainChat: true) == nil)
+        #expect(ModelContextSettingsViewState().conversationContextMode(isPlainChat: true) == .simple)
+        #expect(ModelContextSettingsViewState().conversationContextMode(isPlainChat: false) == .smart)
         #expect(ModelContextSettingsViewState.displayTokenValue(0) == "Automatic")
         #expect(ModelContextSettingsViewState.classicAnswerTokenSteps == [
             0,

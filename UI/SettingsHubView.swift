@@ -265,6 +265,13 @@ public struct SettingsHubView: View {
     private var modelContextSection: some View {
         VStack(alignment: .leading, spacing: .space4) {
             pageHeader("Model & Context", "Local MLX model setup, generation limits, and context budgets.")
+            Picker("Configure", selection: $selectedModelContextMode) {
+                ForEach(ModelContextMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 360, alignment: .leading)
             settingsCard(title: "Resource Profile", symbolName: "memorychip") {
                 Picker("Resource profile", selection: $settings.resourceProfile) {
                     ForEach(ResourceProfile.allCases, id: \.self) { profile in
@@ -273,13 +280,33 @@ public struct SettingsHubView: View {
                 }
                 .pickerStyle(.segmented)
             }
-            settingsCard(title: "Run Limits", symbolName: "slider.horizontal.3") {
-                Picker("Mode", selection: $selectedModelContextMode) {
-                    ForEach(ModelContextMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
+            settingsCard(title: "Conversation Context", symbolName: "text.bubble") {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(selectedModelContextMode.title) strategy")
+                            .font(.bodyS)
+                            .foregroundStyle(Theme.C.textPrimary)
+                        Text(contextModeDescription(for: selectedModelContextMode))
+                            .font(.caption)
+                            .foregroundStyle(Theme.C.textTertiary)
                     }
+                    Spacer(minLength: .space3)
+                    Picker("Context strategy", selection: contextModeBinding(for: selectedModelContextMode)) {
+                        ForEach(ConversationContextMode.allCases) { mode in
+                            Text(mode.label).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 220)
                 }
-                .pickerStyle(.segmented)
+                settingsRow("Effective mode", value: effectiveConversationContextLabel(isPlainChat: selectedModelContextMode.isPlainChat))
+                Text("Simple is deterministic and only sends recent history for clear follow-ups. Smart ranks prior turns with local embeddings and falls back to Simple when embeddings are unavailable.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.C.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            settingsCard(title: "Run Limits", symbolName: "slider.horizontal.3") {
                 steppedTokenSlider(
                     "Max answer tokens",
                     value: answerTokenBinding(for: selectedModelContextMode),
@@ -619,6 +646,28 @@ public struct SettingsHubView: View {
         }
     }
 
+    private func contextModeBinding(for mode: ModelContextMode) -> Binding<ConversationContextMode> {
+        Binding(
+            get: {
+                switch mode {
+                case .chat:
+                    return state.modelContextSettings.plainChatContextMode
+                case .code:
+                    return state.modelContextSettings.codeChatContextMode
+                }
+            },
+            set: { newValue in
+                var updated = state.modelContextSettings
+                switch mode {
+                case .chat:
+                    updated.plainChatContextMode = newValue
+                case .code:
+                    updated.codeChatContextMode = newValue
+                }
+                onUpdateModelContextSettings(updated.normalized())
+            })
+    }
+
     private func modelContextBinding(_ keyPath: WritableKeyPath<ModelContextSettingsViewState, Int>) -> Binding<Int> {
         Binding(
             get: { state.modelContextSettings[keyPath: keyPath] },
@@ -631,7 +680,7 @@ public struct SettingsHubView: View {
 
     private func effectiveContextCapLabel(isPlainChat: Bool) -> String {
         let budget = ResourceBudget.resolved(for: settings.resourceProfile)
-        let role: ModelRole = settings.usesSingleAgentMode() ? .orchestrator : .utility
+        let role: ModelRole = settings.usesSingleAgentMode() ? .orchestrator : (isPlainChat ? .utility : .orchestrator)
         let profileCap = budget.contextTokenBudget(for: role)
             ?? budget.contextTokenBudget(for: .orchestrator)
         let effective = [
@@ -640,5 +689,24 @@ public struct SettingsHubView: View {
         ].compactMap(\.self).min()
         guard let effective else { return "Automatic" }
         return ModelContextSettingsViewState.displayTokenValue(effective)
+    }
+
+    private func effectiveConversationContextLabel(isPlainChat: Bool) -> String {
+        let mode = state.modelContextSettings.conversationContextMode(isPlainChat: isPlainChat)
+        guard mode == .smart else { return EffectiveConversationContextMode.simple.label }
+        let embeddingConfigured = !settings.embeddingsModelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let likelyLoaded = embeddingConfigured && state.modelStatus == .loaded && !settings.usesSingleAgentMode()
+        return likelyLoaded
+            ? EffectiveConversationContextMode.smart.label
+            : EffectiveConversationContextMode.smartDegraded.label
+    }
+
+    private func contextModeDescription(for mode: ModelContextMode) -> String {
+        switch mode {
+        case .chat:
+            return "Plain chat defaults to Simple to avoid pulling old topics into new messages."
+        case .code:
+            return "Code sessions default to Smart for relevant project and task follow-ups."
+        }
     }
 }
