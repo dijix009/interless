@@ -2139,7 +2139,14 @@ public final class WorkspaceSessionModel: ObservableObject {
 
     private func publish(_ event: AppEvent) async {
         await eventBus.publish(event)
-        await refreshHealthStatus()
+        // The health snapshot fan-out (events + scheduler + metrics + recovery +
+        // memory policy + durable cursors) is expensive and rebuilds the whole
+        // health view state. Only do it while the panel is visible — openHealth()
+        // refreshes explicitly, so the panel still populates on open. This stops a
+        // closed Health panel from forcing a refresh on nearly every operation.
+        if isHealthPresented {
+            await refreshHealthStatus()
+        }
     }
 
     private func durableEventCursorStates(
