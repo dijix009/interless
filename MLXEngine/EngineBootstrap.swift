@@ -19,8 +19,10 @@ public enum EngineBootstrap {
         thresholds: MemoryThresholds = .default
     ) async -> InferenceController {
         let budget = ResourceBudget.resolved(for: resourceProfile)
+        var engineTuning = budget.engineTuning
+        if let gpuCacheLimitBytes { engineTuning.gpuCacheLimitBytes = gpuCacheLimitBytes }
         let controller = InferenceController(
-            backend: MLXBackend(gpuCacheLimitBytes: gpuCacheLimitBytes ?? budget.mlxGPUCacheLimitBytes),
+            backend: MLXBackend(engineTuning: engineTuning),
             memoryMonitor: MemoryPressureMonitor(thresholds: thresholds),
             memoryCoordinator: memoryCoordinator,
             resourceProfile: resourceProfile

@@ -229,6 +229,9 @@ public actor InferenceController {
         if request.role != .orchestrator {
             copy.reuseKVCache = false
         }
+        // Resolve engine tuning (KV-cache policy, prefill, memory caps) from the
+        // active budget unless the request already carries an override.
+        copy.engineTuning = request.engineTuning ?? budget.engineTuning
         return copy
     }
 }

@@ -118,4 +118,23 @@ struct MemoryExecutionTests {
         #expect(request.maxTokens == ResourceBudget.smallRAM.maxTokens(for: .utility, reasoningEffort: .medium))
         #expect(request.contextTokenBudget == ResourceBudget.smallRAM.utilityContextTokenBudget)
     }
+
+    @Test func generationRequestCarriesProfileEngineTuning() async throws {
+        let fake = FakeBackend()
+        let controller = InferenceController(backend: fake, resourceProfile: .smallRAM)
+        try await controller.loadModel(id: "m", role: .orchestrator, quantization: .q4)
+
+        let stream = await controller.generate(request: GenerationRequest(
+            role: .orchestrator, input: .prompt("hi")))
+        for try await _ in stream {}
+
+        let request = try #require(await fake.generationRequests.first)
+        let tuning = try #require(request.engineTuning)
+        // smallRAM resolves to aggressive 4-bit KV from the start + a small prefill.
+        #expect(tuning.kvCachePolicy.strategy == .quantized)
+        #expect(tuning.kvCachePolicy.kvBits == 4)
+        #expect(tuning.prefillStepSize == ResourceBudget.smallRAM.engineTuning.prefillStepSize)
+        // The resolved budget injects a proactive allocation ceiling.
+        #expect(tuning.gpuMemoryLimitBytes != nil)
+    }
 }

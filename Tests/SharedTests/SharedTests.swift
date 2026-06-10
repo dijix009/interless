@@ -52,6 +52,47 @@ struct SharedTests {
         #expect(reduced.maxContextCharacters < ResourceBudget.balanced.maxContextCharacters)
         #expect(reduced.maxToolOutputBytes < ResourceBudget.balanced.maxToolOutputBytes)
         #expect(reduced.orchestratorContextTokenBudget == 4_096)
+        // Under pressure the KV cache compresses hardest: 4-bit, quantized from token 0.
+        #expect(reduced.engineTuning.kvCachePolicy.strategy == .quantized)
+        #expect(reduced.engineTuning.kvCachePolicy.kvBits == 4)
+        #expect(reduced.engineTuning.kvCachePolicy.quantizedKVStart == 0)
+        #expect(reduced.engineTuning.embeddingMaxBatchTokens < ResourceBudget.balanced.engineTuning.embeddingMaxBatchTokens)
+    }
+
+    @Test func profilesCarryExpectedEngineTuning() {
+        // smallRAM: aggressive 4-bit KV from the start; larger profiles near-lossless 8-bit.
+        #expect(ResourceBudget.smallRAM.engineTuning.kvCachePolicy.kvBits == 4)
+        #expect(ResourceBudget.smallRAM.engineTuning.kvCachePolicy.quantizedKVStart == 0)
+        #expect(ResourceBudget.balanced.engineTuning.kvCachePolicy.kvBits == 8)
+        #expect(ResourceBudget.balanced.engineTuning.kvCachePolicy.quantizedKVStart == 2_048)
+        #expect(ResourceBudget.largeRAM.engineTuning.kvCachePolicy.kvBits == 8)
+        #expect(ResourceBudget.smallRAM.engineTuning.prefillStepSize == 256)
+        #expect(ResourceBudget.largeRAM.engineTuning.prefillStepSize == 1_024)
+        // Static profile constants stay machine-independent (limit resolved later).
+        #expect(ResourceBudget.smallRAM.engineTuning.gpuMemoryLimitBytes == nil)
+    }
+
+    @Test func resolvedBudgetInjectsProactiveGPUMemoryLimit() throws {
+        let eightGB = 8 * 1024 * 1024 * 1024
+        let budget = ResourceBudget.resolved(for: .smallRAM, physicalMemoryBytes: eightGB)
+        let limit = try #require(budget.engineTuning.gpuMemoryLimitBytes)
+        #expect(limit == Int(0.70 * Double(eightGB)))
+        // The cache-pool alias still reads through to engineTuning.
+        #expect(budget.mlxGPUCacheLimitBytes == budget.engineTuning.gpuCacheLimitBytes)
+    }
+
+    @Test func engineTuningCodableRoundTrips() throws {
+        let tuning = EngineTuning(
+            kvCachePolicy: KVCachePolicy(strategy: .quantized, kvBits: 4, kvGroupSize: 64, quantizedKVStart: 128),
+            prefillStepSize: 384,
+            gpuMemoryLimitBytes: 5_000_000_000,
+            gpuCacheLimitBytes: 128 * 1024 * 1024,
+            embeddingMaxBatchTokens: 2_048,
+            speculativeDecoding: SpeculativeDecodingPolicy(
+                isEnabled: true, draftModelID: "draft", draftQuantization: .q4, numDraftTokens: 3))
+        let data = try JSONEncoder().encode(tuning)
+        let decoded = try JSONDecoder().decode(EngineTuning.self, from: data)
+        #expect(decoded == tuning)
     }
 
     @Test func advertisedQuantizationBitsParsedFromRepoID() {

@@ -47,6 +47,9 @@ public struct GenerationRequest: Sendable, Identifiable {
     /// Whether to reuse the role's persisted KV cache. Defaults to `true` for
     /// the orchestrator (persistent cache) and `false` otherwise (§8).
     public var reuseKVCache: Bool
+    /// Per-request engine tuning override. `nil` = use the active budget's tuning
+    /// (injected by `InferenceController.capped`).
+    public var engineTuning: EngineTuning?
 
     public init(
         role: ModelRole,
@@ -60,6 +63,7 @@ public struct GenerationRequest: Sendable, Identifiable {
         contextTokenBudget: Int? = nil,
         tools: [ToolDefinition] = [],
         reuseKVCache: Bool? = nil,
+        engineTuning: EngineTuning? = nil,
         id: UUID = UUID()
     ) {
         self.id = id
@@ -74,6 +78,7 @@ public struct GenerationRequest: Sendable, Identifiable {
         self.contextTokenBudget = contextTokenBudget
         self.tools = tools
         self.reuseKVCache = reuseKVCache ?? (role == .orchestrator)
+        self.engineTuning = engineTuning
     }
 
     /// The raw prompt text, if this request was built from `.prompt`.

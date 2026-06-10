@@ -43,14 +43,17 @@ public actor MLXBackend: InferenceBackend {
 
     private var models: [ModelRole: Loaded] = [:]
     private var embedders: [ModelRole: LoadedEmbedder] = [:]
-    private let gpuCacheLimitBytes: Int
+    private let engineTuning: EngineTuning
     private var didConfigureMLXMemory = false
     private let log = Logger(subsystem: "dev.interless", category: "inference")
 
-    /// - Parameter gpuCacheLimitBytes: bounds MLX's buffer-recycle pool so the
-    ///   §8 watermarks read real footprint rather than pooled memory.
-    public init(gpuCacheLimitBytes: Int = 256 * 1024 * 1024) {
-        self.gpuCacheLimitBytes = gpuCacheLimitBytes
+    /// - Parameter engineTuning: profile-resolved tuning. `gpuCacheLimitBytes`
+    ///   bounds MLX's buffer-recycle pool so the §8 watermarks read real footprint;
+    ///   `gpuMemoryLimitBytes` (when set) is a proactive allocation ceiling that
+    ///   throttles before the OS swaps; `embeddingMaxBatchTokens` caps embedding
+    ///   sub-batches.
+    public init(engineTuning: EngineTuning = .default) {
+        self.engineTuning = engineTuning
     }
 
     // MARK: - InferenceBackend
@@ -115,7 +118,9 @@ public actor MLXBackend: InferenceBackend {
         handle: LoadedModelHandle
     ) -> AsyncThrowingStream<TokenChunk, Error> {
         AsyncThrowingStream(TokenChunk.self, bufferingPolicy: .unbounded) { continuation in
-            let task = Task {
+            // Prioritize token production so background work (indexing, embeddings
+            // at .utility) cannot starve the GPU-feeding loop.
+            let task = Task(priority: .userInitiated) {
                 do {
                     try await self.runGeneration(request, handle: handle, into: continuation)
                 } catch is CancellationError {
@@ -169,6 +174,9 @@ public actor MLXBackend: InferenceBackend {
         if didConfigureMLXMemory {
             try? MLX.withError {
                 MLX.Memory.clearCache()
+                // Reset peak so diagnostics/metrics reflect the post-eviction
+                // resident set rather than an all-time high across loads.
+                MLX.Memory.peakMemory = 0
             }
         }
     }
@@ -200,7 +208,13 @@ public actor MLXBackend: InferenceBackend {
     private func configureMLXMemoryIfNeeded() throws {
         guard !didConfigureMLXMemory else { return }
         try MLX.withError {
-            MLX.Memory.cacheLimit = gpuCacheLimitBytes
+            // Buffer-recycle pool cap so §8 watermarks read real footprint.
+            MLX.Memory.cacheLimit = engineTuning.gpuCacheLimitBytes
+            // Proactive allocation ceiling: throttle allocations before the OS
+            // swaps (which collapses GPU throughput on unified memory).
+            if let limit = engineTuning.gpuMemoryLimitBytes, limit > 0 {
+                MLX.Memory.memoryLimit = limit
+            }
         }
         didConfigureMLXMemory = true
     }
@@ -258,13 +272,25 @@ public actor MLXBackend: InferenceBackend {
     // MARK: - Mapping helpers (pure)
 
     private static func makeParameters(from request: GenerationRequest) -> GenerateParameters {
-        GenerateParameters(
+        let tuning = request.engineTuning ?? .default
+        let kv = tuning.kvCachePolicy
+        // CRITICAL: `maybeQuantizeKVCache` only converts a `KVCacheSimple`, and
+        // `newCache` returns a `RotatingKVCache` whenever `maxKVSize` is set. So
+        // `maxKVSize` is set ONLY for `.rotatingWindow`; `.quantized` leaves it nil
+        // (→ KVCacheSimple) so `kvBits` actually takes effect after `quantizedKVStart`.
+        let maxKVSize: Int? = (kv.strategy == .rotatingWindow) ? request.contextTokenBudget : nil
+        let kvBits: Int? = (kv.strategy == .quantized) ? kv.kvBits : nil
+        return GenerateParameters(
             maxTokens: request.maxTokens,
-            maxKVSize: request.contextTokenBudget,
+            maxKVSize: maxKVSize,
+            kvBits: kvBits,
+            kvGroupSize: kv.kvGroupSize,
+            quantizedKVStart: kv.quantizedKVStart,
             temperature: request.temperature,
             topP: request.topP,
             topK: request.topK ?? 0,
-            repetitionPenalty: request.repetitionPenalty
+            repetitionPenalty: request.repetitionPenalty,
+            prefillStepSize: tuning.prefillStepSize
         )
     }
 

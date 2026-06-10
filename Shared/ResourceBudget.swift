@@ -44,10 +44,14 @@ public struct ResourceBudget: Sendable, Equatable, Codable {
     public var utilityContextTokenBudget: Int?
     public var orchestratorMaxTokens: Int?
     public var utilityMaxTokens: Int?
-    public var mlxGPUCacheLimitBytes: Int
+    public var engineTuning: EngineTuning
     public var chatTranscriptRetainedCharacters: Int
     public var chatToolEventRetainedCount: Int
     public var fileTreePathLimit: Int
+
+    /// Back-compat alias: the MLX buffer-recycle pool limit now lives in
+    /// `engineTuning`. Existing call sites (e.g. `EngineBootstrap`) keep reading it.
+    public var mlxGPUCacheLimitBytes: Int { engineTuning.gpuCacheLimitBytes }
 
     public init(
         profile: ResourceProfile,
@@ -61,7 +65,7 @@ public struct ResourceBudget: Sendable, Equatable, Codable {
         utilityContextTokenBudget: Int?,
         orchestratorMaxTokens: Int?,
         utilityMaxTokens: Int?,
-        mlxGPUCacheLimitBytes: Int,
+        engineTuning: EngineTuning,
         chatTranscriptRetainedCharacters: Int,
         chatToolEventRetainedCount: Int,
         fileTreePathLimit: Int
@@ -77,7 +81,7 @@ public struct ResourceBudget: Sendable, Equatable, Codable {
         self.utilityContextTokenBudget = utilityContextTokenBudget
         self.orchestratorMaxTokens = orchestratorMaxTokens
         self.utilityMaxTokens = utilityMaxTokens
-        self.mlxGPUCacheLimitBytes = max(0, mlxGPUCacheLimitBytes)
+        self.engineTuning = engineTuning
         self.chatTranscriptRetainedCharacters = max(0, chatTranscriptRetainedCharacters)
         self.chatToolEventRetainedCount = max(0, chatToolEventRetainedCount)
         self.fileTreePathLimit = max(0, fileTreePathLimit)
@@ -91,12 +95,22 @@ public struct ResourceBudget: Sendable, Equatable, Codable {
         case .automatic:
             return resolved(for: .balanced, physicalMemoryBytes: physicalMemoryBytes)
         case .smallRAM:
-            return .smallRAM
+            return smallRAM.withResolvedGPUMemoryLimit(fraction: 0.70, physicalMemoryBytes: physicalMemoryBytes)
         case .balanced:
-            return .balanced
+            return balanced.withResolvedGPUMemoryLimit(fraction: 0.80, physicalMemoryBytes: physicalMemoryBytes)
         case .largeRAM:
-            return .largeRAM
+            return largeRAM.withResolvedGPUMemoryLimit(fraction: 0.85, physicalMemoryBytes: physicalMemoryBytes)
         }
+    }
+
+    /// Returns a copy whose `engineTuning.gpuMemoryLimitBytes` is computed from
+    /// the machine's unified memory, leaving OS headroom. Keeps the static
+    /// profile constants machine-independent (their limit stays `nil`).
+    private func withResolvedGPUMemoryLimit(fraction: Double, physicalMemoryBytes: Int) -> ResourceBudget {
+        var copy = self
+        copy.engineTuning.gpuMemoryLimitBytes = EngineTuning.gpuMemoryLimit(
+            fraction: fraction, physicalMemoryBytes: physicalMemoryBytes)
+        return copy
     }
 
     public func reducedForMemoryPressure() -> ResourceBudget {
@@ -109,6 +123,14 @@ public struct ResourceBudget: Sendable, Equatable, Codable {
         copy.utilityContextTokenBudget = utilityContextTokenBudget.map { max(1_024, $0 / 2) }
         copy.orchestratorMaxTokens = orchestratorMaxTokens.map { max(256, $0 / 2) }
         copy.utilityMaxTokens = utilityMaxTokens.map { max(192, $0 / 2) }
+        // Under pressure, compress the KV cache hardest: quantize from the start
+        // at 4-bit regardless of profile, and shrink embedding sub-batches.
+        var tightenedKV = engineTuning.kvCachePolicy
+        tightenedKV.strategy = .quantized
+        tightenedKV.kvBits = 4
+        tightenedKV.quantizedKVStart = 0
+        copy.engineTuning.kvCachePolicy = tightenedKV
+        copy.engineTuning.embeddingMaxBatchTokens = max(256, engineTuning.embeddingMaxBatchTokens / 2)
         return copy
     }
 
@@ -174,7 +196,14 @@ public struct ResourceBudget: Sendable, Equatable, Codable {
         utilityContextTokenBudget: 2_048,
         orchestratorMaxTokens: 512,
         utilityMaxTokens: 384,
-        mlxGPUCacheLimitBytes: 128 * 1024 * 1024,
+        engineTuning: EngineTuning(
+            kvCachePolicy: KVCachePolicy(
+                strategy: .quantized, kvBits: 4, kvGroupSize: 64, quantizedKVStart: 0),
+            prefillStepSize: 256,
+            gpuMemoryLimitBytes: nil,
+            gpuCacheLimitBytes: 128 * 1024 * 1024,
+            embeddingMaxBatchTokens: 2_048,
+            speculativeDecoding: .disabled),
         chatTranscriptRetainedCharacters: 40_000,
         chatToolEventRetainedCount: 80,
         fileTreePathLimit: 20_000)
@@ -191,7 +220,14 @@ public struct ResourceBudget: Sendable, Equatable, Codable {
         utilityContextTokenBudget: 4_096,
         orchestratorMaxTokens: 1_024,
         utilityMaxTokens: 768,
-        mlxGPUCacheLimitBytes: 256 * 1024 * 1024,
+        engineTuning: EngineTuning(
+            kvCachePolicy: KVCachePolicy(
+                strategy: .quantized, kvBits: 8, kvGroupSize: 64, quantizedKVStart: 2_048),
+            prefillStepSize: 512,
+            gpuMemoryLimitBytes: nil,
+            gpuCacheLimitBytes: 256 * 1024 * 1024,
+            embeddingMaxBatchTokens: 8_192,
+            speculativeDecoding: .disabled),
         chatTranscriptRetainedCharacters: 100_000,
         chatToolEventRetainedCount: 200,
         fileTreePathLimit: 80_000)
@@ -208,7 +244,14 @@ public struct ResourceBudget: Sendable, Equatable, Codable {
         utilityContextTokenBudget: 8_192,
         orchestratorMaxTokens: 2_048,
         utilityMaxTokens: 1_024,
-        mlxGPUCacheLimitBytes: 512 * 1024 * 1024,
+        engineTuning: EngineTuning(
+            kvCachePolicy: KVCachePolicy(
+                strategy: .quantized, kvBits: 8, kvGroupSize: 64, quantizedKVStart: 4_096),
+            prefillStepSize: 1_024,
+            gpuMemoryLimitBytes: nil,
+            gpuCacheLimitBytes: 512 * 1024 * 1024,
+            embeddingMaxBatchTokens: 16_384,
+            speculativeDecoding: .disabled),
         chatTranscriptRetainedCharacters: 250_000,
         chatToolEventRetainedCount: 400,
         fileTreePathLimit: 200_000)
