@@ -140,30 +140,52 @@ public actor MLXBackend: InferenceBackend {
         guard let loaded = embedders[handle.role] else {
             throw InferenceError.modelNotLoaded(handle.role)
         }
+        let maxBatchTokens = max(256, engineTuning.embeddingMaxBatchTokens)
         return try await MLX.withError {
             await loaded.container.perform { context in
                 let tokenizer = context.tokenizer
-                let encoded = texts.map {
-                    tokenizer.encode(text: $0, addSpecialTokens: true)
-                }
-                let maxLength = encoded.reduce(into: 1) { current, tokens in
-                    current = max(current, tokens.count)
-                }
                 let paddingID = tokenizer.eosTokenId ?? 0
-                let padded = stacked(
-                    encoded.map { tokens in
-                        MLXArray(tokens + Array(repeating: paddingID, count: maxLength - tokens.count))
+                // Encode once, keeping the original index so results scatter back in
+                // input order. Sort by length so each sub-batch buckets similar
+                // lengths (minimal padding waste).
+                let encoded = texts.enumerated()
+                    .map { (index: $0.offset, tokens: tokenizer.encode(text: $0.element, addSpecialTokens: true)) }
+                    .sorted { $0.tokens.count < $1.tokens.count }
+                var results = [EmbeddingVector](repeating: EmbeddingVector([]), count: texts.count)
+
+                var start = 0
+                while start < encoded.count {
+                    // Greedily grow a sub-batch while padded size (count × maxLen)
+                    // stays within the token budget; always allow at least one item.
+                    var end = start
+                    var maxLength = 0
+                    while end < encoded.count {
+                        let candidateMax = max(maxLength, encoded[end].tokens.count)
+                        let candidateCount = end - start + 1
+                        if candidateCount > 1, candidateMax * candidateCount > maxBatchTokens { break }
+                        maxLength = candidateMax
+                        end += 1
+                    }
+                    let slice = Array(encoded[start..<end])
+                    let padded = stacked(slice.map { item in
+                        MLXArray(item.tokens + Array(repeating: paddingID, count: maxLength - item.tokens.count))
                     })
-                let mask = (padded .!= paddingID)
-                let tokenTypes = MLXArray.zeros(like: padded)
-                let output = context.model(
-                    padded,
-                    positionIds: nil,
-                    tokenTypeIds: tokenTypes,
-                    attentionMask: mask)
-                let pooled = context.pooling(output, mask: mask, normalize: true, applyLayerNorm: true)
-                pooled.eval()
-                return pooled.map { EmbeddingVector($0.asArray(Float.self)) }
+                    let mask = (padded .!= paddingID)
+                    let tokenTypes = MLXArray.zeros(like: padded)
+                    let output = context.model(
+                        padded,
+                        positionIds: nil,
+                        tokenTypeIds: tokenTypes,
+                        attentionMask: mask)
+                    let pooled = context.pooling(output, mask: mask, normalize: true, applyLayerNorm: true)
+                    pooled.eval() // free this sub-batch's activations before the next
+                    let vectors = pooled.map { EmbeddingVector($0.asArray(Float.self)) }
+                    for (offset, item) in slice.enumerated() where offset < vectors.count {
+                        results[item.index] = vectors[offset]
+                    }
+                    start = end
+                }
+                return results
             }
         }
     }
@@ -228,9 +250,6 @@ public actor MLXBackend: InferenceBackend {
             throw InferenceError.modelNotLoaded(request.role)
         }
         let container = loaded.container
-        let box = loaded.cacheBox
-        // Orchestrator reuses its persistent KV cache; utility/embeddings are ephemeral (§8).
-        let reuse = request.reuseKVCache
 
         // `perform` provides serialized access to the (non-Sendable) ModelContext.
         try await MLX.withError {
@@ -238,7 +257,15 @@ public actor MLXBackend: InferenceBackend {
                 let params = Self.makeParameters(from: request)
                 let userInput = Self.makeUserInput(from: request)
                 let lmInput = try await context.processor.prepare(input: userInput)
-                let cache = (reuse ? box.get() : nil) ?? context.model.newCache(parameters: params)
+                // A fresh KV cache per generation. Cross-request KV reuse is
+                // intentionally NOT enabled: the streaming API yields text (not token
+                // ids), so the generated tokens left in the cache can't be fingerprinted;
+                // correct prompt-prefix reuse would also need cache-trimming back to the
+                // prompt length and chat-template-aware prefix validation. Feeding a new
+                // full prompt against a stale non-empty cache corrupts attention, so we
+                // always start fresh. (`request.reuseKVCache` is reserved for that future
+                // prefix-cache feature.)
+                let cache = context.model.newCache(parameters: params)
 
                 let stream = try MLXLMCommon.generate(
                     input: lmInput, cache: cache, parameters: params, context: context)
@@ -263,7 +290,6 @@ public actor MLXBackend: InferenceBackend {
                         index += 1
                     }
                 }
-                box.set(reuse ? cache : nil)
             }
         }
         continuation.finish()
