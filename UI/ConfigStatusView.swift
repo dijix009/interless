@@ -159,7 +159,7 @@ public struct ConfigStatusView: View {
     private func color(for severity: ConfigDiagnosticViewSeverity) -> Color {
         switch severity {
         case .info: return Theme.C.textSecondary
-        case .warning: return .orange
+        case .warning: return Theme.C.caution
         case .error: return Theme.C.danger
         }
     }

@@ -16,6 +16,8 @@ public struct WorkspaceInspectorView: View {
     public var onCancelJob: @MainActor (UUID) -> Void
     public var onOpenHealth: @MainActor () -> Void
     public var onExportDiagnostics: @MainActor () -> Void
+    // Shared by key with the Settings "Diff layout" control.
+    @AppStorage("chat.diffLayout") private var diffLayoutRaw = ChatDiffLayoutMode.inline.rawValue
 
     public init(
         selectedTab: Binding<WorkspaceInspectorTab>,
@@ -108,7 +110,7 @@ public struct WorkspaceInspectorView: View {
             Label(tab.title.lowercased(), systemImage: tab.symbolName)
                 .labelStyle(.titleAndIcon)
                 .font(.bodyS.weight(.semibold))
-                .padding(.horizontal, 12)
+                .padding(.horizontal, .space3)
                 .frame(height: 28)
                 .background(
                     selectedTab == tab ? Theme.C.surface3 : Color.clear,
@@ -322,7 +324,7 @@ public struct WorkspaceInspectorView: View {
     }
 
     private func changedFileRow(_ row: ChangedFileRowViewState) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: .space2) {
             Text(row.isStaged ? "-" : "+")
                 .font(.bodyS.weight(.semibold))
                 .foregroundStyle(Theme.C.textTertiary)
@@ -409,7 +411,10 @@ public struct WorkspaceInspectorView: View {
             }
             .padding(.space3)
             Divider()
-            DiffViewer(files: state.inspectorDiff.files, fallbackLines: state.inspectorDiff.fallbackLines)
+            DiffViewer(
+                files: state.inspectorDiff.files,
+                fallbackLines: state.inspectorDiff.fallbackLines,
+                layout: ChatDiffLayoutMode(rawValue: diffLayoutRaw) ?? .inline)
         }
     }
 

@@ -109,6 +109,11 @@ struct InterlessApp: App {
 
 private struct WorkspaceShell: View {
     @EnvironmentObject private var session: WorkspaceSessionModel
+    @AppStorage("appearance.mode") private var appearanceModeRaw: String = AppearanceMode.system.rawValue
+
+    private var appearanceMode: AppearanceMode {
+        AppearanceMode(rawValue: appearanceModeRaw) ?? .system
+    }
 
     var body: some View {
         WorkspaceView(
@@ -161,6 +166,7 @@ private struct WorkspaceShell: View {
                 cancelBackgroundJob: session.cancelBackgroundJob,
                 setReasoningEffort: session.setReasoningEffort,
                 setModelContextSettings: session.setModelContextSettings))
+        .preferredColorScheme(appearanceMode.colorScheme)
     }
 
     private func openWorkspace() {

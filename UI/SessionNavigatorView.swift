@@ -103,7 +103,7 @@ public struct SessionNavigatorView: View {
     }
 
     private var sessionSections: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: .space2) {
             ForEach(filteredSections) { section in
                 DisclosureGroup(isExpanded: expandedBinding(for: section.id)) {
                     if section.items.isEmpty {
@@ -252,14 +252,17 @@ public struct SessionNavigatorView: View {
     private func rowBadges(_ item: SessionNavigatorItemViewState) -> some View {
         if item.isActiveNow {
             Circle()
-                .fill(Theme.C.diffAdd)
+                .fill(Theme.C.phosphor)
                 .frame(width: 7, height: 7)
+                .phosphorGlow(radius: 3)
+                .pulsing()
                 .help("Active now")
+                .accessibilityLabel("Active now")
         }
         if item.isInterrupted {
             Image(systemName: "pause.circle")
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(Theme.C.caution)
                 .help("Interrupted")
         }
         if item.unreadCount > 0 {
@@ -281,8 +284,8 @@ public struct SessionNavigatorView: View {
     }
 
     private func iconColor(for item: SessionNavigatorItemViewState) -> Color {
-        if item.isInterrupted { return .orange }
-        if item.isActiveNow { return Theme.C.diffAdd }
+        if item.isInterrupted { return Theme.C.caution }
+        if item.isActiveNow { return Theme.C.phosphor }
         return Theme.C.textTertiary
     }
 
