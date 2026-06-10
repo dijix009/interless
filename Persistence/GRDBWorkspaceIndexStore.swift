@@ -165,20 +165,28 @@ public final class GRDBWorkspaceIndexStore: WorkspaceIndexStore {
 
     public func semanticSearch(vector: EmbeddingVector, limit: Int) async throws -> [SearchHit] {
         guard !vector.isEmpty, limit > 0 else { return [] }
+        let query = vector.values
+        let dimensions = vector.dimensions
         return try await dbWriter.read { db in
-            let rows = try Row.fetchAll(db, sql: "SELECT path, dimensions, vector FROM file_embedding")
-            return rows.compactMap { row -> SearchHit? in
-                let path: String = row["path"]
-                let dimensions: Int = row["dimensions"]
+            // Stream rows one vector at a time and keep only the top-`limit` hits, so
+            // peak memory is O(limit) rather than O(repo). Stored vectors are already
+            // normalized, so a raw dot product over the BLOB equals cosine similarity
+            // — avoiding a per-row [Float]/EmbeddingVector allocation and re-normalize.
+            let cursor = try Row.fetchCursor(db, sql: "SELECT path, dimensions, vector FROM file_embedding")
+            var top: [SearchHit] = []   // ascending score; best (lowest score = most similar) first
+            top.reserveCapacity(limit + 1)
+            while let row = try cursor.next() {
+                let rowDimensions: Int = row["dimensions"]
+                guard rowDimensions == dimensions else { continue }
                 let data: Data = row["vector"]
-                let values = Self.decode(data)
-                guard dimensions == vector.dimensions, values.count == vector.dimensions else { return nil }
-                let similarity = vector.cosineSimilarity(to: EmbeddingVector(values))
-                return SearchHit(relativePath: path, score: -similarity)
+                guard let similarity = Self.dotProduct(data, query) else { continue }
+                let score = -Double(similarity)
+                if top.count >= limit, let worst = top.last, score >= worst.score { continue }
+                let path: String = row["path"]
+                Self.insertSorted(&top, SearchHit(relativePath: path, score: score))
+                if top.count > limit { top.removeLast() }
             }
-            .sorted { $0.score < $1.score }
-            .prefix(limit)
-            .map { $0 }
+            return top
         }
     }
 
@@ -208,5 +216,30 @@ public final class GRDBWorkspaceIndexStore: WorkspaceIndexStore {
             guard let base = buffer.bindMemory(to: Float.self).baseAddress else { return [] }
             return Array(UnsafeBufferPointer(start: base, count: count))
         }
+    }
+
+    /// Dot product of a stored (already-normalized) Float BLOB with the normalized
+    /// query, without materializing a `[Float]` per row. nil on dimension mismatch.
+    private static func dotProduct(_ data: Data, _ query: [Float]) -> Float? {
+        let count = data.count / MemoryLayout<Float>.stride
+        guard count == query.count, count > 0 else { return nil }
+        return data.withUnsafeBytes { raw -> Float in
+            let stored = raw.bindMemory(to: Float.self)
+            var sum: Float = 0
+            for index in 0..<count { sum += stored[index] * query[index] }
+            return sum
+        }
+    }
+
+    /// Insert into an array kept sorted ascending by `score` (binary search). Used
+    /// for the bounded top-`limit` set in `semanticSearch`.
+    private static func insertSorted(_ array: inout [SearchHit], _ hit: SearchHit) {
+        var low = 0
+        var high = array.count
+        while low < high {
+            let mid = (low + high) / 2
+            if array[mid].score < hit.score { low = mid + 1 } else { high = mid }
+        }
+        array.insert(hit, at: low)
     }
 }

@@ -234,6 +234,25 @@ struct PersistenceStoreTests {
         #expect(hits[0].score < hits[1].score)
     }
 
+    @Test func semanticSearchReturnsOnlyTopLimitInOrder() async throws {
+        let store = try makeStore()
+        // Four candidates of varying similarity to the query [1,0,0].
+        let rows: [(String, EmbeddingVector)] = [
+            ("near.md", EmbeddingVector([1, 0, 0])),       // similarity 1.0
+            ("mid.md", EmbeddingVector([0.6, 0.8, 0])),    // similarity 0.6
+            ("low.md", EmbeddingVector([0.2, 0.98, 0])),   // similarity ~0.2
+            ("far.md", EmbeddingVector([0, 1, 0])),        // similarity 0.0
+        ]
+        for (path, vector) in rows {
+            try await store.upsert(IndexedFile(relativePath: path, sizeBytes: 1, modifiedAtEpoch: 1, contentHash: path, content: path))
+            try await store.upsertEmbedding(path: path, vector: vector)
+        }
+        let hits = try await store.semanticSearch(vector: EmbeddingVector([1, 0, 0]), limit: 2)
+        // Only the two most similar, best first (score = -similarity, ascending).
+        #expect(hits.map(\.relativePath) == ["near.md", "mid.md"])
+        #expect(hits[0].score < hits[1].score)
+    }
+
     @Test func appStorePersistsConversationsPromptsAndModelAssignments() async throws {
         let store = try PersistenceBootstrap.inMemoryAppStore()
         let conversationID = try await store.createConversation(title: "Plan", workspacePath: "/tmp/work", mode: .code)

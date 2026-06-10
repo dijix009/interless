@@ -263,14 +263,25 @@ public protocol SessionRuntimeStore: Sendable {
 public actor SessionEventLog {
     private var eventsBySession: [UUID: [SessionEvent]] = [:]
     private var subscribers: [UUID: [UUID: AsyncStream<SessionEvent>.Continuation]] = [:]
+    /// Cap on retained in-memory events per session. The durable SQL store
+    /// (`SessionStore`) is the authoritative history; this is a recent-tail cache.
+    private let retentionLimit: Int
+    private static let streamBufferLimit = 512
 
-    public init() {}
+    public init(retentionLimit: Int = 1000) {
+        self.retentionLimit = max(1, retentionLimit)
+    }
 
     public func append(_ event: SessionEvent) -> SessionEvent {
         let nextSequence = (eventsBySession[event.sessionID]?.last?.sequence ?? 0) + 1
         var saved = event
         saved.sequence = nextSequence
         eventsBySession[event.sessionID, default: []].append(saved)
+        // Tail-prune oldest events; `last.sequence` (the replay cursor anchor) is
+        // preserved, so sequence numbering and durableCursor stay correct.
+        if let count = eventsBySession[event.sessionID]?.count, count > retentionLimit {
+            eventsBySession[event.sessionID]?.removeFirst(count - retentionLimit)
+        }
         for continuation in subscribers[event.sessionID]?.values ?? [:].values {
             continuation.yield(saved)
         }
@@ -323,7 +334,9 @@ public actor SessionEventLog {
 
     public func stream(sessionID: UUID) -> AsyncStream<SessionEvent> {
         let id = UUID()
-        return AsyncStream { continuation in
+        // Bounded buffer: a slow/abandoned subscriber drops oldest-undelivered
+        // events under back-pressure instead of growing memory without limit.
+        return AsyncStream(SessionEvent.self, bufferingPolicy: .bufferingNewest(Self.streamBufferLimit)) { continuation in
             subscribers[sessionID, default: [:]][id] = continuation
             continuation.onTermination = { [weak self] _ in
                 Task { await self?.removeSubscriber(id, sessionID: sessionID) }
