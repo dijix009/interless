@@ -78,7 +78,7 @@ public struct HealthStatusView: View {
             }
             .foregroundStyle(selectedSection == section ? Theme.C.textPrimary : Theme.C.textSecondary)
             .padding(.horizontal, .space2)
-            .padding(.vertical, 8)
+            .padding(.vertical, .space2)
             .background(
                 selectedSection == section ? Theme.C.surface3 : Color.clear,
                 in: RoundedRectangle(cornerRadius: .radiusSm, style: .continuous))
@@ -276,7 +276,7 @@ public struct HealthStatusView: View {
                 .font(.bodyS)
                 .foregroundStyle(Theme.C.textSecondary)
             if let policy = state.memoryPolicy {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: .space1) {
                     Text(policy.summary)
                         .font(.codeMono)
                         .foregroundStyle(Theme.C.textPrimary)
@@ -373,7 +373,7 @@ public struct HealthStatusView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top) {
                 Image(systemName: "arrow.counterclockwise.circle")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(Theme.C.caution)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
                         .font(.bodyS.weight(.semibold))
@@ -463,10 +463,10 @@ public struct HealthStatusView: View {
 
     private func color(for severity: HealthEventSeverity) -> Color {
         switch severity {
-        case .debug: return .secondary
-        case .info: return .blue
-        case .warning: return .orange
-        case .error: return .red
+        case .debug: return Theme.C.textTertiary
+        case .info: return Theme.C.info
+        case .warning: return Theme.C.caution
+        case .error: return Theme.C.danger
         }
     }
 }

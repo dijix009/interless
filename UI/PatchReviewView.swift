@@ -27,7 +27,7 @@ public struct PatchReviewView: View {
             Divider()
             if let proposal {
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: .space3) {
                         diagnostics(proposal)
                         ForEach(proposal.files) { file in
                             fileSection(file)
@@ -70,7 +70,7 @@ public struct PatchReviewView: View {
     private func diagnostics(_ proposal: PatchProposal) -> some View {
         ForEach(proposal.diagnostics, id: \.self) { diagnostic in
             Label(diagnostic, systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+                .foregroundStyle(Theme.C.caution)
         }
     }
 
@@ -93,8 +93,8 @@ public struct PatchReviewView: View {
             ForEach(file.diagnostics, id: \.self) { diagnostic in
                 Label(diagnostic, systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
-                    .padding(8)
+                    .foregroundStyle(Theme.C.caution)
+                    .padding(.space2)
             }
 
             ForEach(file.hunks) { hunk in

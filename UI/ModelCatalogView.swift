@@ -26,7 +26,7 @@ public struct ModelCatalogView: View {
                     Spacer()
                     if entry.isAvailableLocally {
                         Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
+                            .foregroundStyle(Theme.C.success)
                     }
                 }
             }

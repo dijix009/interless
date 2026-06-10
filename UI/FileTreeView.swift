@@ -51,13 +51,10 @@ public struct FileTreeView: View {
                 })
             .accessibilityLabel(row.accessibilityLabel)
             .accessibilityValue(row.node.isDirectory ? (row.isExpanded ? "Expanded" : "Collapsed") : row.path)
-            .onTapGesture {
-                if row.node.isDirectory {
-                    onToggleDirectory(row.path)
-                } else {
-                    onSelect(row.path)
-                }
-            }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityHint(row.node.isDirectory ? "Expands or collapses this folder" : "Opens this file")
+            .accessibilityAction { selectRow(row) }
+            .onTapGesture { selectRow(row) }
         }
         .overlay {
             if rows.isEmpty {
@@ -71,6 +68,14 @@ public struct FileTreeView: View {
                         .tint(Theme.C.accent)
                 }
             }
+        }
+    }
+
+    private func selectRow(_ row: FileTreeVisibleRow) {
+        if row.node.isDirectory {
+            onToggleDirectory(row.path)
+        } else {
+            onSelect(row.path)
         }
     }
 }

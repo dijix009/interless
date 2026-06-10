@@ -32,6 +32,27 @@ public struct SettingsHubView: View {
     public var onUpdateModelContextSettings: @MainActor (ModelContextSettingsViewState) -> Void
     @State private var selectedSection: SettingsHubSection = .chat
     @State private var selectedModelContextMode: ModelContextMode = .chat
+    @AppStorage("appearance.mode") private var appearanceModeRaw: String = AppearanceMode.system.rawValue
+    // Live chat-surface preferences. Shared by key with WorkspaceView, which
+    // feeds them into the chat surface. Defaults match ChatSurfacePreferences().
+    @AppStorage("chat.showReasoningTraces") private var showReasoningTraces = true
+    @AppStorage("chat.wideChatLayout") private var wideChatLayout = false
+    @AppStorage("chat.userMessageRendering") private var userMessageRenderingRaw = UserMessageRenderingMode.plainText.rawValue
+    @AppStorage("chat.diffLayout") private var diffLayoutRaw = ChatDiffLayoutMode.inline.rawValue
+
+    private var userMessageRendering: UserMessageRenderingMode {
+        UserMessageRenderingMode(rawValue: userMessageRenderingRaw) ?? .plainText
+    }
+
+    private var diffLayout: ChatDiffLayoutMode {
+        ChatDiffLayoutMode(rawValue: diffLayoutRaw) ?? .inline
+    }
+
+    private var appearanceModeBinding: Binding<AppearanceMode> {
+        Binding(
+            get: { AppearanceMode(rawValue: appearanceModeRaw) ?? .system },
+            set: { appearanceModeRaw = $0.rawValue })
+    }
 
     public init(
         settings: Binding<ModelSettingsViewState>,
@@ -118,7 +139,7 @@ public struct SettingsHubView: View {
             }
             .foregroundStyle(selectedSection == section ? Theme.C.textPrimary : Theme.C.textSecondary)
             .padding(.horizontal, .space2)
-            .padding(.vertical, 8)
+            .padding(.vertical, .space2)
             .background(
                 selectedSection == section ? Theme.C.surface3 : Color.clear,
                 in: RoundedRectangle(cornerRadius: .radiusSm, style: .continuous))
@@ -213,11 +234,22 @@ public struct SettingsHubView: View {
     private var appearanceSection: some View {
         VStack(alignment: .leading, spacing: .space4) {
             pageHeader("Appearance", "Native macOS density, typography, and surface defaults.")
-            settingsCard(title: "Workspace Density", symbolName: "rectangle.3.group") {
-                settingsRow("Theme", value: "System")
-                settingsRow("Density", value: "Compact")
+            settingsCard(title: "Theme", symbolName: "circle.lefthalf.filled") {
+                VStack(alignment: .leading, spacing: .space2) {
+                    Text("Interless is designed dark-first; light mode stays clean and quiet.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.C.textTertiary)
+                    SegmentedToggle(
+                        selection: appearanceModeBinding,
+                        options: AppearanceMode.allCases.map { ($0, $0.label) })
+                        .frame(maxWidth: 280)
+                        .frame(height: 28)
+                }
+            }
+            settingsCard(title: "Identity", symbolName: "paintpalette") {
+                settingsRow("Accent", value: "Amber (brand) + green phosphor (live)")
                 settingsRow("Typography", value: "SF Pro + SF Mono")
-                settingsRow("Accent", value: "Warm orange")
+                settingsRow("Density", value: "Comfortable")
             }
         }
     }
@@ -225,39 +257,39 @@ public struct SettingsHubView: View {
     private var chatSection: some View {
         VStack(alignment: .leading, spacing: .space4) {
             pageHeader("Chat", "Rendering, tools, and diff presentation for the native chat surface.")
-            VStack(alignment: .leading, spacing: .space3) {
-                Text("Chat Render Mode")
-                    .font(.titleS)
-                HStack(spacing: .space3) {
-                    renderModeCard("Sorted", isSelected: state.chatSurfacePreferences.renderMode == .sorted)
-                    renderModeCard("Live", isSelected: state.chatSurfacePreferences.renderMode == .live)
+            HStack(alignment: .top, spacing: .space4) {
+                settingsCard(title: "User Message Rendering", symbolName: "text.alignleft") {
+                    radioRow("Markdown", selected: userMessageRendering == .markdown) {
+                        userMessageRenderingRaw = UserMessageRenderingMode.markdown.rawValue
+                    }
+                    radioRow("Plain text", selected: userMessageRendering == .plainText) {
+                        userMessageRenderingRaw = UserMessageRenderingMode.plainText.rawValue
+                    }
+                }
+                settingsCard(title: "Diff Layout", symbolName: "plus.forwardslash.minus") {
+                    radioRow("Dynamic", selected: diffLayout == .dynamic) {
+                        diffLayoutRaw = ChatDiffLayoutMode.dynamic.rawValue
+                    }
+                    radioRow("Always inline", selected: diffLayout == .inline) {
+                        diffLayoutRaw = ChatDiffLayoutMode.inline.rawValue
+                    }
+                    radioRow("Always side-by-side", selected: diffLayout == .sideBySide) {
+                        diffLayoutRaw = ChatDiffLayoutMode.sideBySide.rawValue
+                    }
                 }
             }
             settingsCard(title: "Message Stream", symbolName: "dot.radiowaves.left.and.right") {
                 settingsRow("Transport", value: "Native AsyncSequence")
-                Toggle("Show Bash tools opened by default", isOn: .constant(state.chatSurfacePreferences.expandBashToolsByDefault))
-                    .disabled(true)
-                Toggle("Show Edit tools opened by default", isOn: .constant(state.chatSurfacePreferences.expandEditToolsByDefault))
-                    .disabled(true)
-            }
-            HStack(alignment: .top, spacing: .space4) {
-                settingsCard(title: "User Message Rendering", symbolName: "text.alignleft") {
-                    radioRow("Markdown", selected: state.chatSurfacePreferences.userMessageRendering == .markdown)
-                    radioRow("Plain text", selected: state.chatSurfacePreferences.userMessageRendering == .plainText)
-                }
-                settingsCard(title: "Diff Layout", symbolName: "plus.forwardslash.minus") {
-                    radioRow("Dynamic", selected: state.chatSurfacePreferences.diffLayout == .dynamic)
-                    radioRow("Always inline", selected: state.chatSurfacePreferences.diffLayout == .inline)
-                    radioRow("Always side-by-side", selected: state.chatSurfacePreferences.diffLayout == .sideBySide)
-                }
             }
             settingsCard(title: "Chat Behavior", symbolName: "sparkles") {
-                Toggle("Show Reasoning Traces", isOn: .constant(state.chatSurfacePreferences.showReasoningTraces))
-                    .disabled(true)
-                Toggle("Sticky User Header", isOn: .constant(state.chatSurfacePreferences.stickyUserHeader))
-                    .disabled(true)
-                Toggle("Wide Chat Layout", isOn: .constant(state.chatSurfacePreferences.wideChatLayout))
-                    .disabled(true)
+                Toggle("Show reasoning traces", isOn: $showReasoningTraces)
+                Text("Display the model's reasoning effort label on assistant messages.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.C.textTertiary)
+                Toggle("Wide chat layout", isOn: $wideChatLayout)
+                Text("Widen the conversation column for long code and diffs.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.C.textTertiary)
             }
         }
     }
@@ -492,29 +524,6 @@ public struct SettingsHubView: View {
         }
     }
 
-    private func renderModeCard(_ title: String, isSelected: Bool) -> some View {
-        VStack(alignment: .leading, spacing: .space3) {
-            Text(title)
-                .font(.titleS)
-            VStack(alignment: .leading, spacing: 5) {
-                Capsule().frame(height: 6)
-                Capsule().frame(width: 180, height: 6)
-                Capsule().frame(width: 140, height: 6)
-            }
-            .foregroundStyle(Theme.C.textTertiary.opacity(0.45))
-            .padding(.space3)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.C.surface3.opacity(0.45), in: RoundedRectangle(cornerRadius: .radiusSm, style: .continuous))
-        }
-        .foregroundStyle(isSelected ? Theme.C.textPrimary : Theme.C.textSecondary)
-        .padding(.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Theme.C.surface2, in: RoundedRectangle(cornerRadius: .radiusSm, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: .radiusSm, style: .continuous)
-                .stroke(isSelected ? Theme.C.accent : Theme.C.border, lineWidth: 1.4)
-        }
-    }
 
     private func radioRow(_ label: String, selected: Bool) -> some View {
         HStack(spacing: .space2) {
@@ -525,6 +534,17 @@ public struct SettingsHubView: View {
                 .foregroundStyle(selected ? Theme.C.textPrimary : Theme.C.textSecondary)
             Spacer(minLength: 0)
         }
+    }
+
+    /// Interactive radio: keyboard/VoiceOver-operable, announces selected state.
+    private func radioRow(_ label: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            radioRow(label, selected: selected)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
     private func settingsCard<Content: View>(

@@ -145,14 +145,25 @@ public struct WorkspaceView: View {
     @Binding private var isSettingsPresented: Bool
     @Binding private var isHealthPresented: Bool
     public var actions: WorkspaceViewActions
+    @Environment(\.colorScheme) private var colorScheme
     @State private var selectedSidebarMode: SidebarMode = .chat
     @State private var selectedInspectorTab: WorkspaceInspectorTab = .git
-    @State private var isInspectorVisible = false
+    // Persisted pane state — survives relaunch (like Xcode / Linear / VS Code).
+    @AppStorage("workspace.inspectorVisible") private var isInspectorVisible = false
+    @AppStorage("workspace.sidebarHidden") private var sidebarHidden = false
+    @AppStorage("workspace.sidebarWidth") private var sidebarWidthRaw: Double = 260
+    // Live chat-surface prefs (shared by key with SettingsHubView toggles).
+    @AppStorage("chat.showReasoningTraces") private var showReasoningTraces = true
+    @AppStorage("chat.wideChatLayout") private var wideChatLayout = false
+    @AppStorage("chat.userMessageRendering") private var userMessageRenderingRaw = UserMessageRenderingMode.plainText.rawValue
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var isCommandPalettePresented = false
     @State private var sessionNavigatorQuery = ""
     @State private var isWindowFullscreen = false
     @State private var didSyncInitialSidebarMode = false
-    private let sidebarWidth: CGFloat = 260
+    private let minSidebarWidth: Double = 200
+    private let maxSidebarWidth: Double = 420
+    private var sidebarWidth: CGFloat { CGFloat(sidebarWidthRaw) }
     private let collapsedLeadingControlsWidth: CGFloat = 146
     private let trafficLightClearance: CGFloat = 78
     private let fullscreenLeadingClearance: CGFloat = 14
@@ -182,7 +193,27 @@ public struct WorkspaceView: View {
         self.actions = actions
     }
 
+    // NOTE: `body` is split into staged computed properties below. The full
+    // modifier chain in a single expression exceeds the Swift type-checker's
+    // time budget ("unable to type-check in reasonable time"); applying the
+    // overlays, lifecycle handlers, and sheet in stages is behavior-preserving
+    // (modifier order is the same) and compiles quickly.
     public var body: some View {
+        decoratedContent
+            .sheet(isPresented: Binding(
+                get: { state.isPatchReviewPresented },
+                set: { if !$0 { actions.discardPatchProposal() } }
+            )) {
+                PatchReviewView(
+                    proposal: state.patchProposal,
+                    writesAllowed: settings.allowWrites,
+                    onSetHunkAccepted: actions.setPatchHunkAccepted,
+                    onApply: actions.applyAcceptedPatch,
+                    onDiscard: actions.discardPatchProposal)
+            }
+    }
+
+    private var layeredContent: some View {
         ZStack(alignment: .top) {
             mainContent
             edgeShadowOverlay
@@ -198,6 +229,8 @@ public struct WorkspaceView: View {
         }
         .overlay { settingsOverlay }
         .overlay { healthOverlay }
+        .overlay { commandPaletteOverlay }
+        .background { commandPaletteHotkey }
         .background {
             ZStack {
                 TrafficLightAlignmentProbe(
@@ -207,37 +240,35 @@ public struct WorkspaceView: View {
             }
             .frame(width: 0, height: 0)
         }
-        .onExitCommand {
-            if isSettingsPresented {
-                isSettingsPresented = false
-            } else if isHealthPresented {
-                isHealthPresented = false
-            }
-        }
-        .onAppear {
-            guard !didSyncInitialSidebarMode else { return }
-            didSyncInitialSidebarMode = true
-            actions.setPlainChatMode(true)
-        }
-        .onChange(of: state.focusTarget) { _, newValue in
-            if newValue == .search {
-                if selectedSidebarMode == .code {
-                    selectedInspectorTab = .files
-                    isInspectorVisible = true
+    }
+
+    private var decoratedContent: some View {
+        layeredContent
+            .onExitCommand {
+                if isSettingsPresented {
+                    isSettingsPresented = false
+                } else if isHealthPresented {
+                    isHealthPresented = false
                 }
             }
-        }
-        .sheet(isPresented: Binding(
-            get: { state.isPatchReviewPresented },
-            set: { if !$0 { actions.discardPatchProposal() } }
-        )) {
-            PatchReviewView(
-                proposal: state.patchProposal,
-                writesAllowed: settings.allowWrites,
-                onSetHunkAccepted: actions.setPatchHunkAccepted,
-                onApply: actions.applyAcceptedPatch,
-                onDiscard: actions.discardPatchProposal)
-        }
+            .onAppear {
+                // Restore persisted sidebar visibility.
+                columnVisibility = sidebarHidden ? .detailOnly : .all
+                guard !didSyncInitialSidebarMode else { return }
+                didSyncInitialSidebarMode = true
+                actions.setPlainChatMode(true)
+            }
+            .onChange(of: columnVisibility) { _, newValue in
+                sidebarHidden = (newValue == .detailOnly)
+            }
+            .onChange(of: state.focusTarget) { _, newValue in
+                if newValue == .search {
+                    if selectedSidebarMode == .code {
+                        selectedInspectorTab = .files
+                        isInspectorVisible = true
+                    }
+                }
+            }
     }
 
     private var mainContent: some View {
@@ -246,7 +277,10 @@ public struct WorkspaceView: View {
                 sidebar
                     .frame(width: sidebarWidth)
                     .transition(.move(edge: .leading).combined(with: .opacity))
-                Divider()
+                ResizableDivider(
+                    width: $sidebarWidthRaw,
+                    minWidth: minSidebarWidth,
+                    maxWidth: maxSidebarWidth)
             }
             ZStack(alignment: .trailing) {
                 HSplitView {
@@ -261,7 +295,7 @@ public struct WorkspaceView: View {
                         agentName: selectedAgentTitle,
                         agentItems: agentSwitcherItems,
                         selectedAgentID: state.selectedAgentID ?? agentSwitcherItems.first?.id,
-                        preferences: state.chatSurfacePreferences,
+                        preferences: effectiveChatPreferences,
                         showsWorkspaceComposerControls: selectedSidebarMode == .code,
                         contextUsageLabel: effectiveChrome.contextUsageLabel,
                         contextUsageFraction: effectiveChrome.contextUsageFraction,
@@ -359,7 +393,7 @@ public struct WorkspaceView: View {
                 .foregroundStyle(Theme.C.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .shadow(color: .black.opacity(0.92), radius: 5, x: 0, y: 2)
+                .shadow(color: titleShadowColor, radius: 4, x: 0, y: 1)
             if selectedSidebarMode == .code {
                 HStack(spacing: 5) {
                     Text(effectiveChrome.subtitle)
@@ -375,38 +409,58 @@ public struct WorkspaceView: View {
                 .foregroundStyle(Theme.C.textTertiary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .shadow(color: .black.opacity(0.82), radius: 5, x: 0, y: 2)
+                .shadow(color: titleShadowColor, radius: 4, x: 0, y: 1)
             }
         }
     }
 
+    // Dark-first: a subtle dark halo only deepens the floating title over content
+    // in dark mode. In light mode the adaptive top scrim handles legibility, so we
+    // drop the shadow entirely (a black halo on cream reads muddy and un-native).
+    private var titleShadowColor: Color {
+        colorScheme == .dark ? .black.opacity(0.55) : .clear
+    }
+
+    // Floating top bar needs a legible backing. Dark-first: in dark we keep a
+    // black vignette for depth; in light we use a clean scrim of the window
+    // background colour (cream) fading to clear — no black halos on light.
     private var edgeShadowOverlay: some View {
-        ZStack {
+        let isDark = colorScheme == .dark
+        return ZStack {
             VStack(spacing: 0) {
+                // Top scrim: legibility backing for the title block.
                 LinearGradient(
-                    colors: [.black.opacity(0.48), .black.opacity(0.18), .clear],
+                    colors: isDark
+                        ? [.black.opacity(0.42), .black.opacity(0.16), .clear]
+                        : [Theme.C.bg.opacity(0.96), Theme.C.bg.opacity(0.65), .clear],
                     startPoint: .top,
                     endPoint: .bottom)
                     .frame(height: 82)
                 Spacer(minLength: 0)
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.16), .black.opacity(0.32)],
-                    startPoint: .top,
-                    endPoint: .bottom)
-                    .frame(height: 64)
+                // Bottom vignette: dark-mode depth only.
+                if isDark {
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.16), .black.opacity(0.32)],
+                        startPoint: .top,
+                        endPoint: .bottom)
+                        .frame(height: 64)
+                }
             }
-            HStack(spacing: 0) {
-                LinearGradient(
-                    colors: [.black.opacity(0.32), .clear],
-                    startPoint: .leading,
-                    endPoint: .trailing)
-                    .frame(width: 22)
-                Spacer(minLength: 0)
-                LinearGradient(
-                    colors: [.clear, .black.opacity(0.32)],
-                    startPoint: .leading,
-                    endPoint: .trailing)
-                    .frame(width: 22)
+            // Side vignettes: dark-mode depth only.
+            if isDark {
+                HStack(spacing: 0) {
+                    LinearGradient(
+                        colors: [.black.opacity(0.28), .clear],
+                        startPoint: .leading,
+                        endPoint: .trailing)
+                        .frame(width: 22)
+                    Spacer(minLength: 0)
+                    LinearGradient(
+                        colors: [.clear, .black.opacity(0.28)],
+                        startPoint: .leading,
+                        endPoint: .trailing)
+                        .frame(width: 22)
+                }
             }
         }
         .allowsHitTesting(false)
@@ -423,35 +477,13 @@ public struct WorkspaceView: View {
         return max(86, collapsedLeadingControlsWidth - reclaimedTrafficSpace)
     }
 
-    private var conversationIdentity: some View {
-        HStack(spacing: 0) {
-            Text(currentChatTitle)
-                .font(.bodyS.weight(.bold))
-                .foregroundStyle(Theme.C.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            if selectedSidebarMode == .code {
-                Text(" - \(projectFolderName)")
-                    .font(.bodyS.weight(.light))
-                    .foregroundStyle(Theme.C.textTertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
-        .padding(.leading, 14)
-        .padding(.trailing, .space3)
-        .padding(.vertical, 6)
-        .background(
-            Capsule()
-                .fill(.regularMaterial)
-                .offset(y: 1.0))
-        .overlay(
-            Capsule()
-                .fill(Color.primary.opacity(0.035))
-                .offset(y: 1.0))
-        .frame(maxWidth: 460, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(selectedSidebarMode == .code ? "\(currentChatTitle) - \(projectFolderName)" : currentChatTitle)
+    // Overlay the user's live toggle choices onto the base chat-surface prefs.
+    private var effectiveChatPreferences: ChatSurfacePreferences {
+        var prefs = state.chatSurfacePreferences
+        prefs.showReasoningTraces = showReasoningTraces
+        prefs.wideChatLayout = wideChatLayout
+        prefs.userMessageRendering = UserMessageRenderingMode(rawValue: userMessageRenderingRaw) ?? .plainText
+        return prefs
     }
 
     private var effectiveChrome: WorkspaceChromeViewState {
@@ -872,6 +904,139 @@ public struct WorkspaceView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         }
+    }
+
+    // ⌘K: a hidden button hosts the shortcut so it works whenever the workspace
+    // is on screen, without adding a global menu item.
+    private var commandPaletteHotkey: some View {
+        Button("Command Palette") {
+            isCommandPalettePresented.toggle()
+        }
+        .keyboardShortcut("k", modifiers: [.command])
+        .opacity(0)
+        .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var commandPaletteOverlay: some View {
+        if isCommandPalettePresented {
+            CommandPaletteView(isPresented: $isCommandPalettePresented, items: commandPaletteItems)
+                .transition(.opacity)
+        }
+    }
+
+    private var commandPaletteItems: [CommandPaletteItem] {
+        paletteActionItems + paletteSessionItems + paletteFileItems + paletteModelItems
+    }
+
+    private var paletteActionItems: [CommandPaletteItem] {
+        [
+            CommandPaletteItem(id: "act.newPlainChat", group: .action, title: "New chat", symbol: "square.and.pencil") {
+                selectedSidebarMode = .chat
+                actions.startNewChat(true)
+            },
+            CommandPaletteItem(id: "act.newWorkspaceChat", group: .action, title: "New workspace chat", symbol: "square.and.pencil") {
+                selectedSidebarMode = .code
+                actions.startNewChat(false)
+            },
+            CommandPaletteItem(id: "act.toggleSidebar", group: .action, title: "Toggle sidebar", subtitle: "⌃⌘S", symbol: "sidebar.left") {
+                columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+            },
+            CommandPaletteItem(id: "act.toggleInspector", group: .action, title: "Toggle inspector", symbol: "sidebar.right") {
+                selectedSidebarMode = .code
+                isInspectorVisible.toggle()
+            },
+            CommandPaletteItem(id: "act.chatMode", group: .action, title: "Switch to Chat mode", symbol: "bubble.left", isActive: selectedSidebarMode == .chat) {
+                selectedSidebarMode = .chat
+                actions.setPlainChatMode(true)
+            },
+            CommandPaletteItem(id: "act.codeMode", group: .action, title: "Switch to Code mode", symbol: "chevron.left.forwardslash.chevron.right", isActive: selectedSidebarMode == .code) {
+                selectedSidebarMode = .code
+                actions.setPlainChatMode(false)
+            },
+            CommandPaletteItem(id: "act.focusSearch", group: .action, title: "Search files", symbol: "magnifyingglass") {
+                selectedSidebarMode = .code
+                selectedInspectorTab = .files
+                isInspectorVisible = true
+                actions.focusSearch()
+            },
+            CommandPaletteItem(id: "act.openWorkspace", group: .action, title: "Open workspace…", subtitle: "⌘O", symbol: "folder.badge.plus", run: actions.openWorkspace),
+            CommandPaletteItem(id: "act.reindex", group: .action, title: "Reindex workspace", symbol: "arrow.clockwise", run: actions.reindex),
+            CommandPaletteItem(id: "act.refreshGit", group: .action, title: "Refresh Git", symbol: "arrow.triangle.2.circlepath", run: actions.refreshGit),
+            CommandPaletteItem(id: "act.reviewDiff", group: .action, title: "Review current diff", symbol: "plus.forwardslash.minus", run: actions.loadCurrentDiffForReview),
+            CommandPaletteItem(id: "act.cancelChat", group: .action, title: "Cancel active chat", subtitle: "⌘.", symbol: "stop.fill", run: actions.cancelChat),
+            CommandPaletteItem(id: "act.settings", group: .action, title: "Open settings", subtitle: "⌘,", symbol: "gearshape") {
+                isSettingsPresented = true
+            },
+            CommandPaletteItem(id: "act.health", group: .action, title: "Open health", symbol: "waveform.path.ecg", run: actions.openHealth),
+        ]
+    }
+
+    private var paletteSessionItems: [CommandPaletteItem] {
+        sessionNavigatorSections
+            .flatMap(\.items)
+            .filter { $0.kind == .session && !$0.isDraft }
+            .compactMap { item in
+                guard let sessionID = item.sessionID else { return nil }
+                return CommandPaletteItem(
+                    id: "session.\(item.id)",
+                    group: .session,
+                    title: item.title,
+                    subtitle: item.subtitle,
+                    symbol: "bubble.left.and.bubble.right",
+                    isActive: item.isSelected) {
+                        if item.id.hasPrefix("plain-") {
+                            selectedSidebarMode = .chat
+                        } else {
+                            selectedSidebarMode = .code
+                        }
+                        actions.selectChatThread(sessionID)
+                        actions.focusChat()
+                    }
+            }
+    }
+
+    private var paletteFileItems: [CommandPaletteItem] {
+        WorkspaceView.flattenFiles(state.fileTree)
+            .prefix(2000)
+            .map { path in
+                CommandPaletteItem(
+                    id: "file.\(path)",
+                    group: .file,
+                    title: URL(fileURLWithPath: path).lastPathComponent,
+                    subtitle: path,
+                    symbol: "doc.text") {
+                        selectedSidebarMode = .code
+                        actions.selectFile(path)
+                    }
+            }
+    }
+
+    private var paletteModelItems: [CommandPaletteItem] {
+        availableModels.map { id in
+            CommandPaletteItem(
+                id: "model.\(id)",
+                group: .model,
+                title: URL(fileURLWithPath: id).lastPathComponent,
+                subtitle: id,
+                symbol: "cpu",
+                isActive: id == selectedChatModelName) {
+                    selectAndLoadChatModel(id)
+                }
+        }
+    }
+
+    /// Depth-first flatten of the file tree to leaf file paths (directories skipped).
+    private static func flattenFiles(_ nodes: [FileTreeNode]) -> [String] {
+        var out: [String] = []
+        for node in nodes {
+            if node.isDirectory {
+                out.append(contentsOf: flattenFiles(node.children))
+            } else {
+                out.append(node.path)
+            }
+        }
+        return out
     }
 
     private var noticeStack: some View {

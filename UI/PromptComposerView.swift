@@ -12,6 +12,9 @@ public struct PromptComposerAttachmentViewState: Sendable, Equatable, Identifiab
     }
 }
 
+/// Compact, reusable prompt composer. Visually aligned with the primary chat
+/// composer (Theme tokens, amber focus ring, phosphor live caret) so the app
+/// presents a single, coherent input language everywhere it appears.
 public struct PromptComposerView: View {
     @Binding private var draft: String
     public var attachments: [PromptComposerAttachmentViewState]
@@ -19,6 +22,7 @@ public struct PromptComposerView: View {
     public var onSend: @MainActor () -> Void
     public var onAddAttachment: @MainActor () -> Void
     public var onRemoveAttachment: @MainActor (UUID) -> Void
+    @FocusState private var isFocused: Bool
 
     public init(
         draft: Binding<String>,
@@ -34,6 +38,10 @@ public struct PromptComposerView: View {
         self.onSend = onSend
         self.onAddAttachment = onAddAttachment
         self.onRemoveAttachment = onRemoveAttachment
+    }
+
+    private var isSendEnabled: Bool {
+        isEnabled && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     public var body: some View {
@@ -52,25 +60,35 @@ public struct PromptComposerView: View {
                 Button(action: onAddAttachment) {
                     Image(systemName: "paperclip")
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(IconButtonStyle())
                 .disabled(!isEnabled)
                 .accessibilityLabel("Add attachment")
 
                 TextField("Message", text: $draft, axis: .vertical)
                     .textFieldStyle(.plain)
+                    .font(.bodyS.weight(.medium))
+                    .foregroundStyle(isEnabled ? Theme.C.textPrimary : Theme.C.textTertiary)
+                    .tint(Theme.C.phosphor)   // live caret
                     .lineLimit(1...6)
+                    .focused($isFocused)
                     .disabled(!isEnabled)
                     .onSubmit(onSend)
 
                 Button(action: onSend) {
-                    Image(systemName: "arrow.up.circle.fill")
+                    Image(systemName: "paperplane")
+                        .foregroundStyle(isSendEnabled ? Theme.C.accent : Theme.C.textTertiary)
                 }
-                .buttonStyle(.borderless)
-                .disabled(!isEnabled || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .buttonStyle(IconButtonStyle())
+                .disabled(!isSendEnabled)
                 .accessibilityLabel("Send")
             }
             .padding(.horizontal, .space3)
             .padding(.vertical, .space2)
+        }
+        .background(Theme.C.surface, in: RoundedRectangle(cornerRadius: .radiusLg, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: .radiusLg, style: .continuous)
+                .stroke(isFocused ? Theme.C.accent.opacity(0.58) : Theme.C.borderHover, lineWidth: 1)
         }
     }
 
@@ -81,20 +99,25 @@ public struct PromptComposerView: View {
                 .lineLimit(1)
             if !attachment.detail.isEmpty {
                 Text(attachment.detail)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.C.textTertiary)
                     .lineLimit(1)
             }
             Button {
                 onRemoveAttachment(attachment.id)
             } label: {
                 Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(Theme.C.textTertiary)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .accessibilityLabel("Remove attachment")
         }
-        .font(.caption)
+        .font(.metaMono)
+        .foregroundStyle(Theme.C.textSecondary)
         .padding(.horizontal, .space2)
         .padding(.vertical, .space1)
-        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .background(Theme.C.surface2, in: RoundedRectangle(cornerRadius: .radiusSm, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: .radiusSm, style: .continuous)
+                .stroke(Theme.C.border, lineWidth: 1))
     }
 }

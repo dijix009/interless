@@ -137,8 +137,15 @@ public struct ChatPaneView: View {
         return "\(messageSignature)|permission:\(permissionPrompt?.id.uuidString ?? "")|question:\(questionPrompt?.id.uuidString ?? "")"
     }
 
+    private var showsEmptyState: Bool {
+        messages.isEmpty && permissionPrompt == nil && questionPrompt == nil
+    }
+
     public var body: some View {
         VStack(spacing: 0) {
+            if showsEmptyState {
+                emptyState
+            } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: .space4) {
@@ -162,6 +169,7 @@ public struct ChatPaneView: View {
                     scrollToBottom(proxy)
                 }
             }
+            }
             composer
         }
         .background(Theme.C.surface)
@@ -169,6 +177,111 @@ public struct ChatPaneView: View {
             if newValue == .chat {
                 isDraftFocused = true
             }
+        }
+    }
+
+    // MARK: Empty / first-run state
+
+    private var starterPrompts: [(symbol: String, label: String, insert: String)] {
+        if showsWorkspaceComposerControls {
+            return [
+                ("magnifyingglass", "Explain this codebase", "Give me a high-level tour of this codebase — entry points, modules, and how they fit together."),
+                ("ant", "Find a bug", "Look through the workspace for likely bugs or risky code and tell me what you find."),
+                ("wand.and.stars", "Refactor a file", "Suggest a clean refactor for "),
+                ("testtube.2", "Write tests", "Write unit tests for "),
+            ]
+        }
+        return [
+            ("text.alignleft", "Summarize text", "Summarize the following:\n\n"),
+            ("chevron.left.forwardslash.chevron.right", "Write code", "Write a function that "),
+            ("lightbulb", "Brainstorm", "Help me brainstorm ideas about "),
+            ("questionmark.circle", "Explain a concept", "Explain how "),
+        ]
+    }
+
+    private func runStarter(_ insert: String) {
+        draft = insert
+        isDraftFocused = true
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: .space4) {
+            Spacer(minLength: 0)
+
+            VStack(spacing: .space2) {
+                HStack(spacing: 6) {
+                    Text("interless")
+                        .font(.system(.largeTitle, design: .monospaced).weight(.bold))
+                        .foregroundStyle(Theme.C.textPrimary)
+                    Text("›")
+                        .font(.system(.largeTitle, design: .monospaced).weight(.bold))
+                        .foregroundStyle(Theme.C.phosphor)
+                    BlinkingCaret(width: 11, height: 24)
+                }
+                Text(isModelLoaded
+                     ? "Ready. Ask anything, or pick a starting point below."
+                     : "Select a model to begin — open Settings or the model menu in the composer.")
+                    .font(.metaMono)
+                    .foregroundStyle(Theme.C.textTertiary)
+                    .multilineTextAlignment(.center)
+            }
+
+            VStack(spacing: .space2) {
+                ForEach(starterPrompts, id: \.label) { starter in
+                    Button { runStarter(starter.insert) } label: {
+                        HStack(spacing: .space2) {
+                            Image(systemName: starter.symbol)
+                                .font(.metaMono)
+                                .foregroundStyle(Theme.C.phosphor)
+                                .frame(width: 18)
+                            Text(starter.label)
+                                .font(.bodyS.weight(.medium))
+                                .foregroundStyle(Theme.C.textPrimary)
+                            Spacer(minLength: .space3)
+                            Image(systemName: "arrow.up.left")
+                                .font(.controlGlyphSm)
+                                .foregroundStyle(Theme.C.textTertiary)
+                                .accessibilityHidden(true)
+                        }
+                        .padding(.horizontal, .space3)
+                        .padding(.vertical, .space2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .card()
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isModelLoaded)
+                    .opacity(isModelLoaded ? 1 : 0.5)
+                }
+            }
+            .frame(maxWidth: 360)
+
+            HStack(spacing: .space3) {
+                keyHint("return", "send")
+                keyHint("⌃⌘S", "sidebar")
+                keyHint("⌘,", "settings")
+            }
+            .padding(.top, .space1)
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.space5)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Interless — start a conversation")
+    }
+
+    private func keyHint(_ key: String, _ label: String) -> some View {
+        HStack(spacing: 5) {
+            Text(key)
+                .font(.metaMonoSm)
+                .foregroundStyle(Theme.C.textSecondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Theme.C.surface2, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(Theme.C.border, lineWidth: 1))
+            Text(label)
+                .font(.metaMono)
+                .foregroundStyle(Theme.C.textTertiary)
         }
     }
 
@@ -207,7 +320,7 @@ public struct ChatPaneView: View {
             HStack {
                 Spacer(minLength: 48)
                 VStack(alignment: .trailing, spacing: .space1) {
-                    Text(text)
+                    messageText(text)
                         .font(.bodyS)
                         .foregroundStyle(Theme.C.textPrimary)
                         .textSelection(.enabled)
@@ -234,7 +347,13 @@ public struct ChatPaneView: View {
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if message.isStreaming {
-                    ProgressView().controlSize(.small)
+                    HStack(spacing: 6) {
+                        Text("generating")
+                            .font(.metaMono)
+                            .foregroundStyle(Theme.C.phosphor)
+                            .pulsing()
+                        BlinkingCaret(width: 7, height: 13)
+                    }
                 }
                 footer(message, alignment: .leading)
             }
@@ -249,18 +368,35 @@ public struct ChatPaneView: View {
         return trimmed.isEmpty ? "…" : trimmed
     }
 
+    /// Renders user-message body honoring the Markdown / plain-text preference.
+    /// `inlineOnlyPreservingWhitespace` keeps line breaks while rendering inline
+    /// styles (bold, italic, `code`, links) — the safe choice for chat.
+    @ViewBuilder
+    private func messageText(_ text: String) -> some View {
+        if preferences.userMessageRendering == .markdown,
+           let attributed = try? AttributedString(
+               markdown: text,
+               options: AttributedString.MarkdownParsingOptions(
+                   interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            Text(attributed)
+        } else {
+            Text(text)
+        }
+    }
+
     private func assistantHeader(_ message: ChatMessageViewState) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: .space2) {
             Text(assistantModelName(for: message))
                 .font(.bodyS.weight(.semibold))
                 .foregroundStyle(Theme.C.textPrimary)
                 .lineLimit(1)
             Text(agentName)
                 .font(.metaMono)
-                .foregroundStyle(Theme.C.diffAdd)
+                .foregroundStyle(Theme.C.phosphor)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Theme.C.diffAdd.opacity(0.12), in: Capsule())
+                .background(Theme.C.phosphorGlow, in: Capsule())
+                .overlay(Capsule().stroke(Theme.C.phosphor.opacity(0.35), lineWidth: 1))
             if preferences.showReasoningTraces {
                 Text("reasoning: \(assistantReasoningLabel(for: message))")
                     .font(.metaMono)
@@ -360,7 +496,7 @@ public struct ChatPaneView: View {
     // MARK: Composer
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: .space1) {
             changedFilesBar
             VStack(alignment: .leading, spacing: 0) {
                 composerPrelude
@@ -374,6 +510,7 @@ public struct ChatPaneView: View {
                     .textFieldStyle(.plain)
                     .font(.bodyS.weight(.medium))
                     .foregroundStyle(isModelLoaded ? Theme.C.textPrimary : Theme.C.textTertiary)
+                    .tint(Theme.C.phosphor)   // live caret — the cursor is "alive"
                     .focused($isDraftFocused)
                     .disabled(!isComposerInputEnabled)
                     .onSubmit {
@@ -382,7 +519,7 @@ public struct ChatPaneView: View {
                         }
                     }
                     .frame(minHeight: 48, alignment: .topLeading)
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, .space3)
                     .padding(.top, 10)
                     .opacity(isModelLoaded ? 1 : 0.55)
 
@@ -392,14 +529,14 @@ public struct ChatPaneView: View {
                     composerControls
                 }
                 .padding(.horizontal, 9)
-                .padding(.bottom, 8)
+                .padding(.bottom, .space2)
             }
-            .background(Theme.C.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(Theme.C.surface, in: RoundedRectangle(cornerRadius: .radiusLg, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                RoundedRectangle(cornerRadius: .radiusLg, style: .continuous)
                     .stroke(isDraftFocused ? Theme.C.accent.opacity(0.58) : Theme.C.borderHover, lineWidth: 1)
             }
-            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: .radiusLg, style: .continuous))
             .onTapGesture {
                 if isComposerInputEnabled {
                     isDraftFocused = true
@@ -417,30 +554,31 @@ public struct ChatPaneView: View {
         if showsWorkspaceComposerControls, let changedFileSummary, !changedFileSummary.isEmpty {
             HStack(spacing: 5) {
                 Image(systemName: "square.and.pencil")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.metaMonoSm)
                     .foregroundStyle(Theme.C.accent)
                 Text(changedFilesText.prefix)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.metaMonoSm)
                     .foregroundStyle(Theme.C.textSecondary)
                     .lineLimit(1)
                 if let additions = changedFilesText.additions {
                     Text(additions)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.metaMonoSm)
                         .foregroundStyle(Theme.C.diffAdd)
                         .lineLimit(1)
                 }
                 if let deletions = changedFilesText.deletions {
                     Text(deletions)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.metaMonoSm)
                         .foregroundStyle(Theme.C.diffDel)
                         .lineLimit(1)
                 }
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
+                    .font(.controlGlyphSm)
                     .foregroundStyle(Theme.C.textTertiary)
+                    .accessibilityHidden(true)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 10)
+            .padding(.horizontal, .space2)
         }
     }
 
@@ -471,8 +609,8 @@ public struct ChatPaneView: View {
                     }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
+            .padding(.horizontal, .space3)
+            .padding(.top, .space2)
         }
     }
 
@@ -496,14 +634,13 @@ public struct ChatPaneView: View {
             HStack(spacing: 3) {
                 Image(systemName: suggestion.kind.symbolName)
                 Text(suggestion.title)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
                 if let detail = suggestion.detail {
                     Text(detail)
-                        .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(Theme.C.textTertiary)
                         .lineLimit(1)
                 }
             }
+            .font(.metaMonoSm)
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(Color.primary.opacity(0.06), in: Capsule())
@@ -531,7 +668,7 @@ public struct ChatPaneView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Remove attachment")
         }
-        .font(.system(size: 10, design: .monospaced))
+        .font(.metaMonoSm)
         .foregroundStyle(Theme.C.textSecondary)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
@@ -546,7 +683,7 @@ public struct ChatPaneView: View {
             Text(queued.delivery)
                 .foregroundStyle(Theme.C.textTertiary)
         }
-        .font(.system(size: 10, design: .monospaced))
+        .font(.metaMonoSm)
         .foregroundStyle(Theme.C.textSecondary)
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
@@ -629,21 +766,21 @@ public struct ChatPaneView: View {
     }
 
     private var contextUsageStatus: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: .space1) {
             ZStack {
                 Circle()
                     .stroke(Theme.C.textTertiary.opacity(0.34), lineWidth: 1.8)
                 Circle()
                     .trim(from: 0, to: contextUsageDisplay.fraction)
                     .stroke(
-                        Theme.C.diffAdd,
+                        contextUsageDisplay.fraction >= 0.85 ? Theme.C.accent : Theme.C.phosphor,
                         style: StrokeStyle(lineWidth: 1.8, lineCap: .round))
                     .rotationEffect(.degrees(-90))
             }
             .frame(width: 10, height: 10)
 
             Text(contextUsageDisplay.label)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.metaMonoSm)
                 .foregroundStyle(Theme.C.textSecondary)
                 .lineLimit(1)
         }
@@ -681,11 +818,11 @@ public struct ChatPaneView: View {
         Button {
             isReasoningPickerPresented.toggle()
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: .space1) {
                 Image(systemName: "gearshape.fill")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.controlGlyph)
                 Text("Reasoning: \(effectiveReasoningEffort.displayName)")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.metaMonoSm)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -815,18 +952,18 @@ public struct ChatPaneView: View {
                 .disabled(!agent.isEnabled)
             }
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: .space1) {
                 Image(systemName: "person.crop.circle")
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.controlGlyph)
                 Text(selectedComposerAgentTitle)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.metaMonoSm)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 6, weight: .bold))
+                    .font(.controlGlyphSm)
                     .foregroundStyle(Theme.C.textTertiary)
             }
-            .foregroundStyle(Theme.C.diffAdd)
+            .foregroundStyle(Theme.C.phosphor)
             .frame(height: 18)
             .contentShape(Capsule())
         }
@@ -854,11 +991,11 @@ public struct ChatPaneView: View {
         Button {
             action?()
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: .space1) {
                 Image(systemName: symbolName)
                     .font(.system(size: 9, weight: .semibold))
                 Text(title)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.metaMonoSm)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
@@ -897,9 +1034,9 @@ public struct ChatPaneView: View {
             modelSearchQuery = ""
             isModelPickerPresented.toggle()
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: .space1) {
                 Text(shortModelName)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.metaMonoSm)
                     .foregroundStyle(Theme.C.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
