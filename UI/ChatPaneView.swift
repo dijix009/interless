@@ -132,9 +132,19 @@ public struct ChatPaneView: View {
         isWorking || (isModelLoaded && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
-    private var scrollSignature: String {
-        let messageSignature = messages.map { "\($0.id.uuidString):\($0.text.count):\($0.isStreaming)" }.joined(separator: "|")
-        return "\(messageSignature)|permission:\(permissionPrompt?.id.uuidString ?? "")|question:\(questionPrompt?.id.uuidString ?? "")"
+    private var scrollSignature: Int {
+        // O(messageCount) — `utf8.count` is O(1) — instead of building/joining a
+        // whole-transcript string on every render (i.e. on every streamed chunk).
+        var hasher = Hasher()
+        hasher.combine(messages.count)
+        for message in messages {
+            hasher.combine(message.id)
+            hasher.combine(message.text.utf8.count)
+            hasher.combine(message.isStreaming)
+        }
+        hasher.combine(permissionPrompt?.id)
+        hasher.combine(questionPrompt?.id)
+        return hasher.finalize()
     }
 
     private var showsEmptyState: Bool {

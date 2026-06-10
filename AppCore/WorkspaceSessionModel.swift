@@ -93,6 +93,15 @@ public final class WorkspaceSessionModel: ObservableObject {
     private var activeModelLoadID: UUID?
     private var cancelledModelLoadIDs: Set<UUID> = []
     private var generationStats: [UUID: MessageGenerationStats] = [:]
+    /// Per-assistant buffered streamed text, applied to the transcript in coalesced
+    /// flushes (~every `tokenFlushThresholdCharacters`) instead of once per token,
+    /// to cut MainActor publishes / viewState rebuilds during streaming.
+    private var pendingStreamedText: [UUID: String] = [:]
+    /// Memoized context-usage meter. Stable during token streaming (the streaming
+    /// message is excluded from the estimate), so this avoids the O(transcript)
+    /// scan on every streamed chunk; recomputed only when the signature changes.
+    private var contextUsageCache: (signature: Int, value: (label: String, fraction: Double))?
+    private static let tokenFlushThresholdCharacters = 32
     private var permissionContinuations: [UUID: CheckedContinuation<ToolPermissionResolution, Never>] = [:]
     private var questionContinuations: [UUID: CheckedContinuation<ToolQuestionResponse, Error>] = [:]
     private var didAttemptRestore = false
@@ -1362,11 +1371,14 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func handleAgentEvent(_ event: AgentEvent, assistantID: UUID, sessionID: UUID?) {
+        // Flush buffered streamed text before any non-token event mutates the
+        // transcript, so ordering with tool/route/completion events is preserved.
+        if case .token = event {} else { flushPendingStreamedText(id: assistantID) }
         switch event {
         case .token(let chunk):
             updateGenerationStats(for: assistantID, chunk: chunk)
             if !chunk.text.isEmpty {
-                appendToMessage(id: assistantID, text: chunk.text)
+                bufferStreamedText(id: assistantID, text: chunk.text)
             }
         case .toolIterationStarted(let iteration):
             let id = appendTool("Tool iteration \(iteration)")
@@ -1429,11 +1441,12 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func handlePlainChatEvent(_ event: AgentEvent, assistantID: UUID, sessionID: UUID?) {
+        if case .token = event {} else { flushPendingStreamedText(id: assistantID) }
         switch event {
         case .token(let chunk):
             updateGenerationStats(for: assistantID, chunk: chunk)
             if !chunk.text.isEmpty {
-                appendToMessage(id: assistantID, text: chunk.text)
+                bufferStreamedText(id: assistantID, text: chunk.text)
             }
         case .completed(let result):
             updateGenerationSpeed(for: assistantID, info: result.completionInfo)
@@ -1452,6 +1465,24 @@ public final class WorkspaceSessionModel: ObservableObject {
     private func appendToMessage(id: UUID, text: String) {
         guard let index = chatMessages.firstIndex(where: { $0.id == id }) else { return }
         chatMessages[index].text += text
+        trimChatTranscript()
+    }
+
+    /// Buffer a streamed chunk; apply to the transcript only once enough text has
+    /// accumulated, so most tokens cost a cheap dictionary append rather than a
+    /// `@Published` mutation + transcript trim + viewState rebuild.
+    private func bufferStreamedText(id: UUID, text: String) {
+        pendingStreamedText[id, default: ""] += text
+        if (pendingStreamedText[id]?.utf8.count ?? 0) >= Self.tokenFlushThresholdCharacters {
+            flushPendingStreamedText(id: id)
+        }
+    }
+
+    /// Apply any buffered streamed text for `id` to the transcript in one mutation.
+    private func flushPendingStreamedText(id: UUID) {
+        guard let pending = pendingStreamedText.removeValue(forKey: id), !pending.isEmpty else { return }
+        guard let index = chatMessages.firstIndex(where: { $0.id == id }) else { return }
+        chatMessages[index].text += pending
         trimChatTranscript()
     }
 
@@ -1503,6 +1534,7 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func finishStreamingMessage(id: UUID) {
+        flushPendingStreamedText(id: id)
         guard let index = chatMessages.firstIndex(where: { $0.id == id }) else { return }
         if chatMessages[index].tokensPerSecond == nil,
            let speed = resolvedTokensPerSecond(for: id, info: nil) {
@@ -1707,6 +1739,10 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func estimatedContextWindowUsage() -> (label: String, fraction: Double) {
+        let signature = contextUsageSignature()
+        if let cache = contextUsageCache, cache.signature == signature {
+            return cache.value
+        }
         let mode = visibleConversationMode
         let role: ModelRole = settings.usesSingleAgentMode() ? .orchestrator : (mode == .chat ? .utility : .orchestrator)
         let tokenBudget = effectiveContextTokenCap(isPlainChat: mode == .chat, role: role)
@@ -1714,7 +1750,27 @@ public final class WorkspaceSessionModel: ObservableObject {
             messages: chatMessages,
             draft: chatDraft)
         let fraction = min(max(Double(tokenEstimate) / Double(max(1, tokenBudget)), 0), 1)
-        return (Self.formatContextUsageLabel(fraction), fraction)
+        let value = (Self.formatContextUsageLabel(fraction), fraction)
+        contextUsageCache = (signature, value)
+        return value
+    }
+
+    /// Cheap signature for the context-usage memo. O(messageCount) — `utf8.count`
+    /// is O(1) — and excludes streaming messages, so it stays constant while a
+    /// message streams (the estimate ignores in-flight messages anyway).
+    private func contextUsageSignature() -> Int {
+        var hasher = Hasher()
+        hasher.combine(chatMessages.count)
+        for message in chatMessages where !message.isStreaming {
+            hasher.combine(message.id)
+            hasher.combine(message.text.utf8.count)
+        }
+        let isPlainChat = visibleConversationMode == .chat
+        hasher.combine(chatDraft)
+        hasher.combine(isPlainChat)
+        hasher.combine(effectiveContextTokenCap(isPlainChat: isPlainChat))
+        hasher.combine(modelContextSettings.conversationContextMode(isPlainChat: isPlainChat))
+        return hasher.finalize()
     }
 
     private func estimatedContextTokens(
@@ -1916,12 +1972,15 @@ public final class WorkspaceSessionModel: ObservableObject {
 
     private func trimChatTranscript() {
         let budget = ResourceBudget.resolved(for: settings.resourceProfile)
-        var total = chatMessages.reduce(0) { $0 + $1.text.count }
+        // `utf8.count` is O(1) per String (native storage), so this scan is
+        // O(messageCount) rather than O(totalCharacters) of a grapheme `.count`.
+        // It slightly over-counts multibyte text, which only trims a touch earlier.
+        var total = chatMessages.reduce(0) { $0 + $1.text.utf8.count }
         while total > budget.chatTranscriptRetainedCharacters,
               let first = chatMessages.first,
               !first.isStreaming,
               chatMessages.count > 2 {
-            total -= first.text.count
+            total -= first.text.utf8.count
             chatMessages.removeFirst()
         }
 
@@ -2384,7 +2443,9 @@ public final class WorkspaceSessionModel: ObservableObject {
             ])
             let currentEnvironment = environment ?? chatOnlyEnvironment
             let builder = Self.conversationContextBuilder(sessionStore: sessionStore, environment: currentEnvironment)
-            Task.detached {
+            // Background embedding/index work runs at .utility so it cannot contend
+            // with the .userInitiated token-generation loop.
+            Task.detached(priority: .utility) {
                 await builder.indexMessagePart(part)
             }
         } catch {
