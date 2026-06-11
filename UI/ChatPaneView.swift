@@ -1115,8 +1115,7 @@ public struct ChatPaneView: View {
 
     private func modelPickerRow(_ id: String) -> some View {
         Button {
-            onSelectModelID(id)
-            isModelPickerPresented = false
+            selectModelFromPopover(id)
         } label: {
             HStack(spacing: .space2) {
                 Text(displayName(for: id))
@@ -1141,8 +1140,7 @@ public struct ChatPaneView: View {
 
     private func modelDownloadRow(_ id: String) -> some View {
         Button {
-            onSelectModelID(id)
-            isModelPickerPresented = false
+            selectModelFromPopover(id)
         } label: {
             HStack(spacing: .space2) {
                 Image(systemName: "arrow.down.circle")
@@ -1171,6 +1169,17 @@ public struct ChatPaneView: View {
         }
         .buttonStyle(.plain)
         .help("Download and load \(id)")
+    }
+
+    @MainActor
+    private func selectModelFromPopover(_ id: String) {
+        isModelPickerPresented = false
+        modelSearchQuery = ""
+        DispatchQueue.main.async {
+            Task { @MainActor in
+                onSelectModelID(id)
+            }
+        }
     }
 
     private func modelPickerSectionLabel(_ title: String) -> some View {

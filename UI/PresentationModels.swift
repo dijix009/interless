@@ -1944,6 +1944,17 @@ public enum ChatComposerModel {
         return uniqueNonEmpty([configured] + local)
     }
 
+    public static func shouldLoadSelectedModel(
+        currentModelID: String,
+        selectedModelID: String,
+        status: ModelLoadStatus
+    ) -> Bool {
+        let current = currentModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selected = selectedModelID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty else { return false }
+        return current != selected || status != .loaded
+    }
+
     private static func uniqueNonEmpty(_ values: [String]) -> [String] {
         var seen = Set<String>()
         var result: [String] = []

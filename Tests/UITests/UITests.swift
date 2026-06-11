@@ -466,6 +466,25 @@ struct UITests {
         ])
     }
 
+    @Test func chatComposerModelSelectionLoadsOnlyWhenNeeded() {
+        #expect(ChatComposerModel.shouldLoadSelectedModel(
+            currentModelID: "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            selectedModelID: "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            status: .loaded) == false)
+        #expect(ChatComposerModel.shouldLoadSelectedModel(
+            currentModelID: "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            selectedModelID: "mlx-community/gemma-2-2b-it-4bit",
+            status: .loaded))
+        #expect(ChatComposerModel.shouldLoadSelectedModel(
+            currentModelID: "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            selectedModelID: "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            status: .idle))
+        #expect(ChatComposerModel.shouldLoadSelectedModel(
+            currentModelID: "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            selectedModelID: "   ",
+            status: .idle) == false)
+    }
+
     @Test func modelDownloadProgressFormatsComposerStatus() {
         let progress = ModelDownloadProgressViewState(
             modelID: "mlx-community/gemma-2-2b-it-4bit",
