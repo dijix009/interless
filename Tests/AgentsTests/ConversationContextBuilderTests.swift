@@ -108,6 +108,35 @@ struct ConversationContextBuilderTests {
     }
 }
 
+    @Test func compactionPrefersAbstractiveSummaryAndSimpleModeReadsIt() async throws {
+        let sessionID = UUID()
+        let store = ContextMemoryStore()
+        // Enough parts to cross the >= 24 candidate compaction trigger.
+        for index in 0..<30 {
+            await store.append(SessionMessagePart(
+                sessionID: sessionID,
+                messageID: UUID(),
+                role: index % 2 == 0 ? .user : .assistant,
+                text: "Exchange number \(index) about the Interless retrieval design."))
+        }
+        let builder = await store.builder(embedTexts: { _ in nil })
+
+        await builder.compactIfNeeded(
+            sessionID: sessionID,
+            mode: .simple,
+            summarize: { _ in "- decided to use FTS5\n- open task: wire retrieval" })
+
+        // Simple mode consults the checkpoint and carries the abstractive summary.
+        let bundle = await builder.build(request: .init(
+            sessionID: sessionID,
+            prompt: "Tell me more about it.",
+            mode: .simple,
+            isPlainChat: true,
+            effectiveContextTokenCap: 4_096))
+        #expect(bundle.summaryID != nil)
+        #expect(bundle.observations.contains { $0.contains("decided to use FTS5") })
+    }
+
 private actor ContextMemoryStore {
     private var parts: [SessionMessagePart] = []
     private var embeddings: [UUID: SessionMessageEmbedding] = [:]
