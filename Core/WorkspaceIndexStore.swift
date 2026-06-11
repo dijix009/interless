@@ -1,3 +1,4 @@
+import Foundation
 import Shared
 
 /// In-process seam between the Workspace engine and the SQLite/FTS5 index
@@ -41,6 +42,25 @@ public protocol WorkspaceIndexStore: Sendable {
     /// with FTS results using the same ordering convention.
     func semanticSearch(vector: EmbeddingVector, limit: Int) async throws -> [SearchHit]
 
+    /// Begin a full scan: returns a seen-epoch strictly greater than every stamp
+    /// already in the index (and ≥ wall-clock seconds), so a scan started in the
+    /// same second as earlier writes still prunes correctly.
+    func beginScan() async throws -> Int
+
+    /// Insert or replace many files inside one transaction (bounds the per-file
+    /// transaction storm during full reindex), stamping each row with `seenAt`.
+    func upsertBatch(_ files: [IndexedFile], seenAt: Int) async throws
+
+    /// Stamp existing rows as visited by the scan that started at `seenAt`.
+    /// Used by the full-scan fast path so unchanged files survive `pruneUnseen`
+    /// without a row rewrite.
+    func markSeen(paths: [String], seenAt: Int) async throws
+
+    /// Delete every index row whose seen-epoch predates `scanStart`, returning
+    /// the number of files removed. Only valid after a COMPLETE full scan (every
+    /// surviving file must have been stamped via upsert/updateState/markSeen).
+    func pruneUnseen(olderThan scanStart: Int) async throws -> Int
+
     /// Generic workspace metadata (last scan time, branch, HEAD, schema version, …).
     func metadata(key: String) async throws -> String?
     func setMetadata(key: String, value: String?) async throws
@@ -56,4 +76,19 @@ public extension WorkspaceIndexStore {
     func semanticSearch(vector: EmbeddingVector, limit: Int) async throws -> [SearchHit] {
         []
     }
+
+    func beginScan() async throws -> Int {
+        Int(Date().timeIntervalSince1970)
+    }
+
+    func upsertBatch(_ files: [IndexedFile], seenAt: Int) async throws {
+        for file in files { try await upsert(file) }
+    }
+
+    /// Default no-op: stores without seen-epoch tracking keep all rows…
+    func markSeen(paths: [String], seenAt: Int) async throws {}
+
+    /// …and consequently never prune. Conformers used with the full-scan
+    /// indexer must override the seen-epoch family for deletion pruning to work.
+    func pruneUnseen(olderThan scanStart: Int) async throws -> Int { 0 }
 }

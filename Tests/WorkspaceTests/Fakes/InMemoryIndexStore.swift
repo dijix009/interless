@@ -1,3 +1,4 @@
+import Foundation
 import Shared
 import Core
 
@@ -6,13 +7,43 @@ import Core
 actor InMemoryIndexStore: WorkspaceIndexStore {
     private(set) var docs: [String: IndexedFile] = [:]
     private var meta: [String: String] = [:]
+    private var seenAtByPath: [String: Int] = [:]
     private(set) var upsertCount = 0
     private(set) var updateStateCount = 0
     private(set) var removedPaths: [String] = []
 
     func upsert(_ file: IndexedFile) async throws {
         docs[file.relativePath] = file
+        seenAtByPath[file.relativePath] = Int(Date().timeIntervalSince1970)
         upsertCount += 1
+    }
+
+    func beginScan() async throws -> Int {
+        let maxSeen = seenAtByPath.values.max() ?? 0
+        return max(Int(Date().timeIntervalSince1970), maxSeen + 1)
+    }
+
+    func upsertBatch(_ files: [IndexedFile], seenAt: Int) async throws {
+        for file in files {
+            try await upsert(file)
+            seenAtByPath[file.relativePath] = seenAt
+        }
+    }
+
+    func markSeen(paths: [String], seenAt: Int) async throws {
+        for path in paths where docs[path] != nil {
+            seenAtByPath[path] = max(seenAtByPath[path] ?? 0, seenAt)
+        }
+    }
+
+    func pruneUnseen(olderThan scanStart: Int) async throws -> Int {
+        let stale = docs.keys.filter { (seenAtByPath[$0] ?? 0) < scanStart }
+        for path in stale {
+            docs[path] = nil
+            seenAtByPath[path] = nil
+            removedPaths.append(path)
+        }
+        return stale.count
     }
 
     func updateState(_ state: FileIndexState) async throws {
@@ -21,11 +52,13 @@ actor InMemoryIndexStore: WorkspaceIndexStore {
         doc.modifiedAtEpoch = state.modifiedAtEpoch
         doc.contentHash = state.contentHash
         docs[state.relativePath] = doc
+        seenAtByPath[state.relativePath] = Int(Date().timeIntervalSince1970)
         updateStateCount += 1
     }
 
     func removeFile(path: String) async throws {
         docs[path] = nil
+        seenAtByPath[path] = nil
         removedPaths.append(path)
     }
 

@@ -104,6 +104,15 @@ enum WorkspaceSchema {
                 """)
         }
 
+        migrator.registerMigration("v4_seen_epoch") { db in
+            // Scan-epoch stamp for SQL-side deletion pruning: a full scan stamps
+            // every visited row, then deletes `WHERE seenAt < scanStart` — replacing
+            // the previous in-RAM all-paths set diff (O(repo) memory). Additive:
+            // legacy rows default to 0 and are stamped on the next full scan.
+            try db.execute(sql: "ALTER TABLE indexed_file ADD COLUMN seenAt INTEGER NOT NULL DEFAULT 0")
+            try db.execute(sql: "CREATE INDEX idx_indexed_file_seenAt ON indexed_file(seenAt)")
+        }
+
         // Reserved for §12's later tables (conversations, model assignments,
         // prompt history) — additive migrations after the workspace index.
 

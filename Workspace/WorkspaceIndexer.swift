@@ -73,9 +73,12 @@ public actor WorkspaceIndexer {
 
                 var progress = IndexingProgress(phase: .scanning)
                 do {
-                    let known = try await store.knownFileStates()
-                    let knownByPath = Dictionary(known.map { ($0.relativePath, $0) }, uniquingKeysWith: { a, _ in a })
-                    var seen = Set<String>()
+                    // Memory is O(batch), not O(repo): per-path indexed lookups replace
+                    // the previous load-everything dict, and deletions are pruned in
+                    // SQL via the `seenAt` scan epoch instead of an all-paths set diff.
+                    let scanStart = try await store.beginScan()
+                    var pendingUpserts: [IndexedFile] = []
+                    var pendingSeen: [String] = []
                     continuation.yield(progress)
 
                     let stream = try await scanner.scan(root: root)
@@ -83,17 +86,21 @@ public actor WorkspaceIndexer {
                     for await entry in stream where !entry.isDirectory {
                         try Task.checkCancellation()
                         progress.scanned += 1
-                        seen.insert(entry.relativePath)
 
-                        let prior = knownByPath[entry.relativePath]
+                        let prior = try await store.fileState(path: entry.relativePath)
                         // Cheap fast-path: size + mtime unchanged ⇒ skip (no read/hash).
                         if let prior, prior.sizeBytes == entry.sizeBytes, prior.modifiedAtEpoch == entry.modifiedAtEpoch {
                             progress.skipped += 1
+                            pendingSeen.append(entry.relativePath)
+                            if pendingSeen.count >= 512 {
+                                try await store.markSeen(paths: pendingSeen, seenAt: scanStart)
+                                pendingSeen.removeAll(keepingCapacity: true)
+                            }
                             Self.throttledYield(&progress, continuation)
                             continue
                         }
 
-                        try await Self.process(
+                        if let file = try await Self.process(
                             entry: entry,
                             prior: prior,
                             root: root,
@@ -103,18 +110,31 @@ public actor WorkspaceIndexer {
                             config: config,
                             metrics: metrics,
                             progress: &progress,
-                            log: log)
+                            log: log) {
+                            pendingUpserts.append(file)
+                            if pendingUpserts.count >= 128 {
+                                try await store.upsertBatch(pendingUpserts, seenAt: scanStart)
+                                pendingUpserts.removeAll(keepingCapacity: true)
+                            }
+                        } else {
+                            // Touched (updateState already stamped seenAt) or unreadable —
+                            // stamp it so the prune below keeps the existing entry.
+                            pendingSeen.append(entry.relativePath)
+                            if pendingSeen.count >= 512 {
+                                try await store.markSeen(paths: pendingSeen, seenAt: scanStart)
+                                pendingSeen.removeAll(keepingCapacity: true)
+                            }
+                        }
                         progress.lastPath = entry.relativePath
                         Self.throttledYield(&progress, continuation)
                     }
+                    try await store.upsertBatch(pendingUpserts, seenAt: scanStart)
+                    try await store.markSeen(paths: pendingSeen, seenAt: scanStart)
 
                     // Prune deletions — only valid after a complete scan.
                     progress.phase = .pruning
                     continuation.yield(progress)
-                    for deletedPath in Set(knownByPath.keys).subtracting(seen) {
-                        try await store.removeFile(path: deletedPath)
-                        progress.removed += 1
-                    }
+                    progress.removed += try await store.pruneUnseen(olderThan: scanStart)
 
                     // Record git metadata.
                     let status = await git.snapshot(root: root)
@@ -192,7 +212,7 @@ public actor WorkspaceIndexer {
                             continue
                         }
 
-                        try await Self.process(
+                        if let file = try await Self.process(
                             entry: entry,
                             prior: prior,
                             root: root,
@@ -202,7 +222,9 @@ public actor WorkspaceIndexer {
                             config: config,
                             metrics: metrics,
                             progress: &progress,
-                            log: log)
+                            log: log) {
+                            try await store.upsertBatch([file], seenAt: Int(Date().timeIntervalSince1970))
+                        }
                         Self.throttledYield(&progress, continuation)
                     }
 
@@ -282,28 +304,29 @@ public actor WorkspaceIndexer {
         metrics: MetricsRecorder?,
         progress: inout IndexingProgress,
         log: Logger
-    ) async throws {
+    ) async throws -> IndexedFile? {
         let fileURL = root.appendingPathComponent(entry.relativePath)
         let loaded = await loader.load(fileAt: fileURL, config: config)
         switch loaded {
         case let .text(content, _, hash):
             await metrics?.record(.init(kind: .indexBytesRead, unit: .bytes, value: Double(entry.sizeBytes), metadata: ["path": entry.relativePath]))
             let structure = extractor.extract(from: content, relativePath: entry.relativePath)
-            try await Self.upsertIfChanged(
+            return try await Self.fileToUpsert(
                 store, prior: prior, entry: entry, hash: hash,
                 content: content, structure: structure, progress: &progress)
         case let .binary(_, hash):
             await metrics?.record(.init(kind: .indexBytesRead, unit: .bytes, value: Double(entry.sizeBytes), metadata: ["path": entry.relativePath]))
-            try await Self.upsertIfChanged(
+            return try await Self.fileToUpsert(
                 store, prior: prior, entry: entry, hash: hash,
                 content: nil, structure: CodeStructure(), progress: &progress)
         case .skippedTooLarge:
             await metrics?.record(.init(kind: .indexSkippedTooLargeCount, unit: .count, value: 1, metadata: ["path": entry.relativePath]))
-            try await Self.upsertIfChanged(
+            return try await Self.fileToUpsert(
                 store, prior: prior, entry: entry, hash: "oversize:\(entry.sizeBytes)",
                 content: nil, structure: CodeStructure(), progress: &progress)
         case let .unreadable(reason):
             log.notice("skip unreadable \(entry.relativePath, privacy: .public): \(reason, privacy: .public)")
+            return nil
         }
     }
 
@@ -335,7 +358,10 @@ public actor WorkspaceIndexer {
         return nil
     }
 
-    private static func upsertIfChanged(
+    /// Decides what to write for a scanned file: `nil` when content is unchanged
+    /// (after refreshing size/mtime state for a `touch`), else the `IndexedFile`
+    /// for the caller to upsert — batched on the full-scan path.
+    private static func fileToUpsert(
         _ store: any WorkspaceIndexStore,
         prior: FileIndexState?,
         entry: FileEntry,
@@ -343,7 +369,7 @@ public actor WorkspaceIndexer {
         content: String?,
         structure: CodeStructure,
         progress: inout IndexingProgress
-    ) async throws {
+    ) async throws -> IndexedFile? {
         if let prior, prior.contentHash == hash {
             if prior.sizeBytes != entry.sizeBytes || prior.modifiedAtEpoch != entry.modifiedAtEpoch {
                 try await store.updateState(FileIndexState(
@@ -353,11 +379,12 @@ public actor WorkspaceIndexer {
                     contentHash: hash))
             }
             progress.skipped += 1 // content unchanged (e.g. a `touch`)
-            return
+            return nil
         }
         // Store the scanner's stat size (not the loader's byte count) so the
         // incremental size/mtime fast-path stays consistent across re-scans.
-        try await store.upsert(IndexedFile(
+        progress.indexed += 1
+        return IndexedFile(
             relativePath: entry.relativePath,
             sizeBytes: entry.sizeBytes,
             modifiedAtEpoch: entry.modifiedAtEpoch,
@@ -365,8 +392,7 @@ public actor WorkspaceIndexer {
             content: content,
             symbols: structure.symbols,
             comments: structure.comments,
-            references: structure.references))
-        progress.indexed += 1
+            references: structure.references)
     }
 
     private static func throttledYield(
