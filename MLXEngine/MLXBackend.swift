@@ -247,6 +247,13 @@ public actor MLXBackend: InferenceBackend {
         return handle
     }
 
+    public func countTokens(_ text: String, role: ModelRole) async -> Int {
+        guard let loaded = models[role] else { return InferenceTokenEstimate.estimate(text) }
+        return await loaded.container.perform { context in
+            context.tokenizer.encode(text: text, addSpecialTokens: false).count
+        }
+    }
+
     public func unloadDraftModel(forRole role: ModelRole) async {
         guard drafts[role] != nil else { return }
         drafts[role] = nil

@@ -1433,6 +1433,10 @@ public final class WorkspaceSessionModel {
         case .contextBuilt:
             let id = appendTool("Context built")
             Task { await persistSessionMessagePart(sessionID: sessionID, messageID: id, role: .system, kind: "context", text: "Context built") }
+        case .contextCompacted(let degraded, let dropped):
+            let text = "Context compacted to fit the model window (\(degraded) tool output\(degraded == 1 ? "" : "s") trimmed, \(dropped) message\(dropped == 1 ? "" : "s") dropped)"
+            let id = appendTool(text)
+            Task { await persistSessionMessagePart(sessionID: sessionID, messageID: id, role: .system, kind: "context", text: text) }
         case .completed(let result):
             updateGenerationSpeed(for: assistantID, info: result.completionInfo)
             replaceMessage(id: assistantID, text: result.text, isStreaming: false)
@@ -1807,7 +1811,10 @@ public final class WorkspaceSessionModel {
         let messageCount = (transcriptCharacters > 0 ? messages.filter { !$0.isToolEvent }.count : 0)
             + (trimmedDraft.isEmpty ? 0 : 1)
         let messageOverhead = max(0, messageCount) * 8
-        return Int(ceil(Double(transcriptCharacters + draftCharacters) / 4.0)) + messageOverhead
+        // Conservative ~3.3 chars/token for code-heavy text. This meter is a UI
+        // estimate only; the enforced budget is the tokenizer-true fitting in the
+        // agent loop (AgentContextFitter).
+        return Int(ceil(Double(transcriptCharacters + draftCharacters) / 3.3)) + messageOverhead
     }
 
     private func estimatedConversationContextCharacters(for promptText: String) -> Int {

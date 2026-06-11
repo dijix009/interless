@@ -108,6 +108,9 @@ public enum AgentEvent: Sendable, Equatable {
     case toolStarted(ToolRequest)
     case toolFinished(ToolResult)
     case contextBuilt(AgentContext)
+    /// Pre-send fitting degraded old tool outputs to previews and/or dropped
+    /// oldest history to fit the model's real token budget.
+    case contextCompacted(degraded: Int, dropped: Int)
     case token(TokenChunk)
     case completed(AgentResult)
     case failed(String)

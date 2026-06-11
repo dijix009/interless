@@ -191,6 +191,11 @@ public actor InferenceController {
         return true
     }
 
+    /// Tokenizer-true count via the backend (estimate when the role isn't loaded).
+    public func countTokens(_ text: String, role: ModelRole) async -> Int {
+        await backend.countTokens(text, role: role)
+    }
+
     public func unload(role: ModelRole) async {
         guard handles[role] != nil else { return }
         handles[role] = nil
