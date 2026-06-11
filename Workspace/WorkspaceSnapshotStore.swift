@@ -6,6 +6,7 @@ public enum WorkspaceSnapshotError: Error, Sendable, Equatable {
     case pathEscapesWorkspace(String)
     case snapshotNotFound(UUID)
     case fileTooLarge(path: String, bytes: Int, limit: Int)
+    case directoryTooLarge(path: String, bytes: Int, limit: Int)
     case unsupportedSymlink(String)
 }
 
@@ -67,6 +68,7 @@ public actor WorkspaceSnapshotStore {
     private let rootPath: String
     private let storageRoot: URL
     private let maxEntryBytes: Int
+    private let maxDirectoryBytes: Int
     private let fileManager: FileManager
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
@@ -75,6 +77,7 @@ public actor WorkspaceSnapshotStore {
         root: URL,
         storageRoot: URL? = nil,
         maxEntryBytes: Int = 8 * 1024 * 1024,
+        maxDirectoryBytes: Int = 64 * 1024 * 1024,
         fileManager: FileManager = .default
     ) {
         let resolvedRoot = root.standardizedFileURL.resolvingSymlinksInPath()
@@ -82,6 +85,7 @@ public actor WorkspaceSnapshotStore {
         self.rootPath = resolvedRoot.path.hasSuffix("/") ? resolvedRoot.path : resolvedRoot.path + "/"
         self.storageRoot = storageRoot ?? Self.defaultStorageRoot(for: resolvedRoot)
         self.maxEntryBytes = max(0, maxEntryBytes)
+        self.maxDirectoryBytes = max(0, maxDirectoryBytes)
         self.fileManager = fileManager
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -201,8 +205,14 @@ public actor WorkspaceSnapshotStore {
         try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
 
         if isDirectory.boolValue {
+            // Pre-measure: a snapshot must never copy an unbounded tree (e.g. a
+            // build directory) into Application Support.
+            let totalBytes = directorySizeBytes(at: target)
+            guard totalBytes <= maxDirectoryBytes else {
+                throw WorkspaceSnapshotError.directoryTooLarge(path: path, bytes: totalBytes, limit: maxDirectoryBytes)
+            }
             try fileManager.copyItem(at: target, to: destination)
-            return WorkspaceSnapshotEntry(relativePath: path, kind: .directory)
+            return WorkspaceSnapshotEntry(relativePath: path, kind: .directory, byteCount: totalBytes)
         }
 
         let bytes = values.fileSize ?? 0
@@ -211,6 +221,22 @@ public actor WorkspaceSnapshotStore {
         }
         try fileManager.copyItem(at: target, to: destination)
         return WorkspaceSnapshotEntry(relativePath: path, kind: .file, byteCount: bytes)
+    }
+
+    /// Sums regular-file sizes under `url` (stops early once over the cap).
+    private func directorySizeBytes(at url: URL) -> Int {
+        guard let enumerator = fileManager.enumerator(
+            at: url,
+            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+            options: []) else { return 0 }
+        var total = 0
+        for case let child as URL in enumerator {
+            guard let values = try? child.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                  values.isRegularFile == true else { continue }
+            total += values.fileSize ?? 0
+            if total > maxDirectoryBytes { return total }
+        }
+        return total
     }
 
     private func write(_ snapshot: WorkspaceMutationSnapshot, to directory: URL) throws {
