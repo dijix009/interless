@@ -122,7 +122,9 @@ private struct ModelAgentRunner: Sendable {
     let defaultAgentID: String?
 
     func run(task: AgentTask) -> AsyncThrowingStream<AgentEvent, Error> {
-        AsyncThrowingStream(AgentEvent.self, bufferingPolicy: .unbounded) { continuation in
+        // Bounded for the same reason as AgentOrchestrator: `.completed` carries
+        // the full text, so dropped token chunks under extreme lag self-repair.
+        AsyncThrowingStream(AgentEvent.self, bufferingPolicy: .bufferingNewest(256)) { continuation in
             let taskHandle = Task {
                 do {
                     try Task.checkCancellation()

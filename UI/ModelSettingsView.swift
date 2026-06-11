@@ -282,6 +282,19 @@ public struct ModelSettingsView: View {
                         Text("Automatic adapts budgets to the machine: strict on 8GB-class hardware, larger on high-memory Macs.")
                             .font(.metaMono)
                             .foregroundStyle(Theme.C.textSecondary)
+                        settingsDivider()
+                        Toggle("Speculative decoding (draft model)", isOn: $settings.enableSpeculativeDecoding)
+                            .font(.bodyS)
+                        if settings.enableSpeculativeDecoding {
+                            controlRow("Draft model ID") {
+                                TextField("e.g. a small same-family MLX model", text: $settings.speculativeDraftModelID)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 320)
+                            }
+                            Text("Large RAM profile only. The draft must share the main model's tokenizer; incompatible drafts are rejected at load and chat falls back to normal decoding.")
+                                .font(.metaMono)
+                                .foregroundStyle(Theme.C.textSecondary)
+                        }
                     }
                 }
                 .padding(.top, .space2)

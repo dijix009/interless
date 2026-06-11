@@ -234,6 +234,77 @@ struct PersistenceStoreTests {
         #expect(hits[0].score < hits[1].score)
     }
 
+    @Test func pruneUnseenRemovesUnstampedRowsAcrossAllTables() async throws {
+        let queue = try DatabaseQueue()
+        try WorkspaceSchema.makeMigrator().migrate(queue)
+        let store = GRDBWorkspaceIndexStore(dbWriter: queue)
+        let symbol = CodeSymbol(name: "Widget", kind: "type", line: 1, column: 1)
+        let reference = CodeReference(name: "Foundation", kind: "import", line: 1, column: 1)
+        for path in ["keep1.swift", "keep2.swift", "gone.swift"] {
+            try await store.upsert(IndexedFile(
+                relativePath: path, sizeBytes: 1, modifiedAtEpoch: 1, contentHash: path,
+                content: "struct Widget {}", symbols: [symbol], comments: ["doc"], references: [reference]))
+            try await store.upsertEmbedding(path: path, vector: EmbeddingVector([1, 0, 0]))
+        }
+        // Stamp the keepers with a future epoch, then prune between the stamps.
+        let future = Int(Date().timeIntervalSince1970) + 100
+        try await store.markSeen(paths: ["keep1.swift", "keep2.swift"], seenAt: future)
+        let removed = try await store.pruneUnseen(olderThan: future - 1)
+
+        #expect(removed == 1)
+        #expect(try await store.fileState(path: "gone.swift") == nil)
+        #expect(try await store.fileState(path: "keep1.swift") != nil)
+        // Dependent rows for the pruned file are gone from every table.
+        let counts = try await queue.read { db in
+            (goneSymbols: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM file_symbol WHERE path = 'gone.swift'") ?? -1,
+             goneReferences: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM file_reference WHERE path = 'gone.swift'") ?? -1,
+             goneEmbeddings: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM file_embedding WHERE path = 'gone.swift'") ?? -1,
+             keptSymbols: try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM file_symbol WHERE path = 'keep1.swift'") ?? -1)
+        }
+        #expect(counts.goneSymbols == 0)
+        #expect(counts.goneReferences == 0)
+        #expect(counts.goneEmbeddings == 0)
+        #expect(counts.keptSymbols == 1)
+        let hits = try await store.search("Widget", limit: 10)
+        #expect(!hits.contains { $0.relativePath == "gone.swift" })
+        #expect(hits.contains { $0.relativePath == "keep1.swift" })
+    }
+
+    @Test func upsertBatchIndexesAllFilesInOneCall() async throws {
+        let store = try makeStore()
+        let files = (1...3).map { index in
+            IndexedFile(
+                relativePath: "batch\(index).swift", sizeBytes: index, modifiedAtEpoch: index,
+                contentHash: "h\(index)", content: "func batched\(index)() {}",
+                symbols: [CodeSymbol(name: "batched\(index)", kind: "function", line: 1, column: 1)])
+        }
+        try await store.upsertBatch(files, seenAt: Int(Date().timeIntervalSince1970))
+        for index in 1...3 {
+            #expect(try await store.fileState(path: "batch\(index).swift") != nil)
+            let hits = try await store.search("batched\(index)", limit: 5)
+            #expect(hits.contains { $0.relativePath == "batch\(index).swift" })
+        }
+    }
+
+    @Test func semanticSearchReturnsOnlyTopLimitInOrder() async throws {
+        let store = try makeStore()
+        // Four candidates of varying similarity to the query [1,0,0].
+        let rows: [(String, EmbeddingVector)] = [
+            ("near.md", EmbeddingVector([1, 0, 0])),       // similarity 1.0
+            ("mid.md", EmbeddingVector([0.6, 0.8, 0])),    // similarity 0.6
+            ("low.md", EmbeddingVector([0.2, 0.98, 0])),   // similarity ~0.2
+            ("far.md", EmbeddingVector([0, 1, 0])),        // similarity 0.0
+        ]
+        for (path, vector) in rows {
+            try await store.upsert(IndexedFile(relativePath: path, sizeBytes: 1, modifiedAtEpoch: 1, contentHash: path, content: path))
+            try await store.upsertEmbedding(path: path, vector: vector)
+        }
+        let hits = try await store.semanticSearch(vector: EmbeddingVector([1, 0, 0]), limit: 2)
+        // Only the two most similar, best first (score = -similarity, ascending).
+        #expect(hits.map(\.relativePath) == ["near.md", "mid.md"])
+        #expect(hits[0].score < hits[1].score)
+    }
+
     @Test func appStorePersistsConversationsPromptsAndModelAssignments() async throws {
         let store = try PersistenceBootstrap.inMemoryAppStore()
         let conversationID = try await store.createConversation(title: "Plan", workspacePath: "/tmp/work", mode: .code)

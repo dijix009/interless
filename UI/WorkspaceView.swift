@@ -617,9 +617,14 @@ public struct WorkspaceView: View {
     private func selectAndLoadChatModel(_ id: String) {
         let selected = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !selected.isEmpty else { return }
-        let changed = settings.orchestratorModelID != selected
+        let shouldLoad = ChatComposerModel.shouldLoadSelectedModel(
+            currentModelID: settings.orchestratorModelID,
+            selectedModelID: selected,
+            status: state.modelStatus)
         settings.orchestratorModelID = selected
-        if changed || state.modelStatus != .loaded {
+        guard shouldLoad else { return }
+        Task { @MainActor in
+            await Task.yield()
             actions.loadModels()
         }
     }

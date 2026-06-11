@@ -22,64 +22,134 @@ public final class GRDBWorkspaceIndexStore: WorkspaceIndexStore {
 
     public func upsert(_ file: IndexedFile) async throws {
         try await dbWriter.write { db in
-            try db.execute(sql: """
-                INSERT INTO indexed_file (path, size, mtime, contentHash, indexedAt)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(path) DO UPDATE SET
-                    size = excluded.size, mtime = excluded.mtime,
-                    contentHash = excluded.contentHash, indexedAt = excluded.indexedAt
-                """, arguments: [
-                    file.relativePath, file.sizeBytes, file.modifiedAtEpoch,
-                    file.contentHash, Int(Date().timeIntervalSince1970),
-                ])
-            guard let rowid = try Int64.fetchOne(
-                db, sql: "SELECT id FROM indexed_file WHERE path = ?", arguments: [file.relativePath])
-            else { return }
-            // Refresh the FTS row (contentless: delete by rowid, then re-insert).
-            try db.execute(sql: "DELETE FROM file_fts WHERE rowid = ?", arguments: [rowid])
-            try db.execute(
-                sql: """
-                    INSERT INTO file_fts (rowid, filename, body, symbols, comments, "references")
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                arguments: [
-                    rowid,
-                    file.fileName,
-                    file.content ?? "",
-                    file.symbols.map { "\($0.kind) \($0.name)" }.joined(separator: " "),
-                    file.comments.joined(separator: " "),
-                    file.references.map { "\($0.kind) \($0.name)" }.joined(separator: " "),
-                ])
-            try db.execute(sql: "DELETE FROM file_symbol WHERE fileID = ?", arguments: [rowid])
-            for symbol in file.symbols {
-                try db.execute(sql: """
-                    INSERT INTO file_symbol (fileID, path, name, kind, line, column)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """, arguments: [rowid, file.relativePath, symbol.name, symbol.kind, symbol.line, symbol.column])
+            try Self.write(file, into: db, seenAt: Int(Date().timeIntervalSince1970))
+        }
+    }
+
+    /// Strictly greater than every existing stamp (and ≥ wall clock), so a scan
+    /// started in the same second as earlier writes still prunes correctly.
+    public func beginScan() async throws -> Int {
+        try await dbWriter.read { db in
+            let maxSeen = try Int.fetchOne(db, sql: "SELECT MAX(seenAt) FROM indexed_file") ?? 0
+            return max(Int(Date().timeIntervalSince1970), maxSeen + 1)
+        }
+    }
+
+    /// One transaction for the whole batch: amortizes the WAL commit/fsync that
+    /// previously ran once per file during a full reindex.
+    public func upsertBatch(_ files: [IndexedFile], seenAt: Int) async throws {
+        guard !files.isEmpty else { return }
+        try await dbWriter.write { db in
+            for file in files {
+                try Self.write(file, into: db, seenAt: seenAt)
             }
-            try db.execute(sql: "DELETE FROM file_reference WHERE fileID = ?", arguments: [rowid])
-            for reference in file.references {
-                try db.execute(sql: """
-                    INSERT INTO file_reference (fileID, path, name, kind, line, column)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """, arguments: [rowid, file.relativePath, reference.name, reference.kind, reference.line, reference.column])
-            }
+        }
+    }
+
+    /// Shared per-file write. `cachedStatement` parses each SQL once per
+    /// connection (not once per row/file); `RETURNING id` replaces the previous
+    /// INSERT + SELECT-back round trip.
+    private static func write(_ file: IndexedFile, into db: Database, seenAt: Int) throws {
+        let now = Int(Date().timeIntervalSince1970)
+        let upsertStatement = try db.cachedStatement(sql: """
+            INSERT INTO indexed_file (path, size, mtime, contentHash, indexedAt, seenAt)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(path) DO UPDATE SET
+                size = excluded.size, mtime = excluded.mtime,
+                contentHash = excluded.contentHash, indexedAt = excluded.indexedAt,
+                seenAt = excluded.seenAt
+            RETURNING id
+            """)
+        guard let rowid = try Int64.fetchOne(upsertStatement, arguments: [
+            file.relativePath, file.sizeBytes, file.modifiedAtEpoch,
+            file.contentHash, now, seenAt,
+        ]) else { return }
+        // Refresh the FTS row (contentless: delete by rowid, then re-insert).
+        try db.cachedStatement(sql: "DELETE FROM file_fts WHERE rowid = ?")
+            .execute(arguments: [rowid])
+        try db.cachedStatement(sql: """
+            INSERT INTO file_fts (rowid, filename, body, symbols, comments, "references")
+            VALUES (?, ?, ?, ?, ?, ?)
+            """).execute(arguments: [
+                rowid,
+                file.fileName,
+                file.content ?? "",
+                file.symbols.map { "\($0.kind) \($0.name)" }.joined(separator: " "),
+                file.comments.joined(separator: " "),
+                file.references.map { "\($0.kind) \($0.name)" }.joined(separator: " "),
+            ])
+        try db.cachedStatement(sql: "DELETE FROM file_symbol WHERE fileID = ?")
+            .execute(arguments: [rowid])
+        let symbolInsert = try db.cachedStatement(sql: """
+            INSERT INTO file_symbol (fileID, path, name, kind, line, column)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """)
+        for symbol in file.symbols {
+            try symbolInsert.execute(
+                arguments: [rowid, file.relativePath, symbol.name, symbol.kind, symbol.line, symbol.column])
+        }
+        try db.cachedStatement(sql: "DELETE FROM file_reference WHERE fileID = ?")
+            .execute(arguments: [rowid])
+        let referenceInsert = try db.cachedStatement(sql: """
+            INSERT INTO file_reference (fileID, path, name, kind, line, column)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """)
+        for reference in file.references {
+            try referenceInsert.execute(
+                arguments: [rowid, file.relativePath, reference.name, reference.kind, reference.line, reference.column])
         }
     }
 
     public func updateState(_ state: FileIndexState) async throws {
         try await dbWriter.write { db in
+            let now = Int(Date().timeIntervalSince1970)
             try db.execute(sql: """
                 UPDATE indexed_file
-                SET size = ?, mtime = ?, contentHash = ?, indexedAt = ?
+                SET size = ?, mtime = ?, contentHash = ?, indexedAt = ?, seenAt = ?
                 WHERE path = ?
                 """, arguments: [
                     state.sizeBytes,
                     state.modifiedAtEpoch,
                     state.contentHash,
-                    Int(Date().timeIntervalSince1970),
+                    now,
+                    now,
                     state.relativePath,
                 ])
+        }
+    }
+
+    public func markSeen(paths: [String], seenAt: Int) async throws {
+        guard !paths.isEmpty else { return }
+        try await dbWriter.write { db in
+            // Chunk to stay far below SQLite's bind-variable limit.
+            for chunk in stride(from: 0, to: paths.count, by: 500).map({ Array(paths[$0..<min($0 + 500, paths.count)]) }) {
+                let placeholders = databaseQuestionMarks(count: chunk.count)
+                try db.execute(
+                    sql: "UPDATE indexed_file SET seenAt = ? WHERE path IN (\(placeholders))",
+                    arguments: StatementArguments([seenAt] + chunk.map { $0 as (any DatabaseValueConvertible) }))
+            }
+        }
+    }
+
+    public func pruneUnseen(olderThan scanStart: Int) async throws -> Int {
+        try await dbWriter.write { db in
+            // Explicit deletes for every dependent table — contentless FTS and the
+            // by-path embedding table have no FK to cascade from, and we don't want
+            // prune correctness to hinge on the foreign_keys pragma either.
+            try db.execute(
+                sql: "DELETE FROM file_fts WHERE rowid IN (SELECT id FROM indexed_file WHERE seenAt < ?)",
+                arguments: [scanStart])
+            try db.execute(
+                sql: "DELETE FROM file_symbol WHERE fileID IN (SELECT id FROM indexed_file WHERE seenAt < ?)",
+                arguments: [scanStart])
+            try db.execute(
+                sql: "DELETE FROM file_reference WHERE fileID IN (SELECT id FROM indexed_file WHERE seenAt < ?)",
+                arguments: [scanStart])
+            try db.execute(
+                sql: "DELETE FROM file_embedding WHERE path IN (SELECT path FROM indexed_file WHERE seenAt < ?)",
+                arguments: [scanStart])
+            try db.execute(sql: "DELETE FROM indexed_file WHERE seenAt < ?", arguments: [scanStart])
+            return db.changesCount
         }
     }
 
@@ -165,20 +235,28 @@ public final class GRDBWorkspaceIndexStore: WorkspaceIndexStore {
 
     public func semanticSearch(vector: EmbeddingVector, limit: Int) async throws -> [SearchHit] {
         guard !vector.isEmpty, limit > 0 else { return [] }
+        let query = vector.values
+        let dimensions = vector.dimensions
         return try await dbWriter.read { db in
-            let rows = try Row.fetchAll(db, sql: "SELECT path, dimensions, vector FROM file_embedding")
-            return rows.compactMap { row -> SearchHit? in
-                let path: String = row["path"]
-                let dimensions: Int = row["dimensions"]
+            // Stream rows one vector at a time and keep only the top-`limit` hits, so
+            // peak memory is O(limit) rather than O(repo). Stored vectors are already
+            // normalized, so a raw dot product over the BLOB equals cosine similarity
+            // — avoiding a per-row [Float]/EmbeddingVector allocation and re-normalize.
+            let cursor = try Row.fetchCursor(db, sql: "SELECT path, dimensions, vector FROM file_embedding")
+            var top: [SearchHit] = []   // ascending score; best (lowest score = most similar) first
+            top.reserveCapacity(limit + 1)
+            while let row = try cursor.next() {
+                let rowDimensions: Int = row["dimensions"]
+                guard rowDimensions == dimensions else { continue }
                 let data: Data = row["vector"]
-                let values = Self.decode(data)
-                guard dimensions == vector.dimensions, values.count == vector.dimensions else { return nil }
-                let similarity = vector.cosineSimilarity(to: EmbeddingVector(values))
-                return SearchHit(relativePath: path, score: -similarity)
+                guard let similarity = Self.dotProduct(data, query) else { continue }
+                let score = -Double(similarity)
+                if top.count >= limit, let worst = top.last, score >= worst.score { continue }
+                let path: String = row["path"]
+                Self.insertSorted(&top, SearchHit(relativePath: path, score: score))
+                if top.count > limit { top.removeLast() }
             }
-            .sorted { $0.score < $1.score }
-            .prefix(limit)
-            .map { $0 }
+            return top
         }
     }
 
@@ -201,12 +279,28 @@ public final class GRDBWorkspaceIndexStore: WorkspaceIndexStore {
         values.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
-    private static func decode(_ data: Data) -> [Float] {
+    /// Dot product of a stored (already-normalized) Float BLOB with the normalized
+    /// query, without materializing a `[Float]` per row. nil on dimension mismatch.
+    private static func dotProduct(_ data: Data, _ query: [Float]) -> Float? {
         let count = data.count / MemoryLayout<Float>.stride
-        guard count > 0 else { return [] }
-        return data.withUnsafeBytes { buffer in
-            guard let base = buffer.bindMemory(to: Float.self).baseAddress else { return [] }
-            return Array(UnsafeBufferPointer(start: base, count: count))
+        guard count == query.count, count > 0 else { return nil }
+        return data.withUnsafeBytes { raw -> Float in
+            let stored = raw.bindMemory(to: Float.self)
+            var sum: Float = 0
+            for index in 0..<count { sum += stored[index] * query[index] }
+            return sum
         }
+    }
+
+    /// Insert into an array kept sorted ascending by `score` (binary search). Used
+    /// for the bounded top-`limit` set in `semanticSearch`.
+    private static func insertSorted(_ array: inout [SearchHit], _ hit: SearchHit) {
+        var low = 0
+        var high = array.count
+        while low < high {
+            let mid = (low + high) / 2
+            if array[mid].score < hit.score { low = mid + 1 } else { high = mid }
+        }
+        array.insert(hit, at: low)
     }
 }

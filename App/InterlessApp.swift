@@ -5,10 +5,10 @@ import UI
 
 @main
 struct InterlessApp: App {
-    @StateObject private var session: WorkspaceSessionModel
+    @State private var session: WorkspaceSessionModel
 
     init() {
-        _session = StateObject(wrappedValue: WorkspaceSessionModel(
+        _session = State(initialValue: WorkspaceSessionModel(
             appStore: try? PersistenceBootstrap.liveAppStore(),
             sessionStore: try? PersistenceBootstrap.liveSessionStore(),
             configStore: try? PersistenceBootstrap.liveConfigStore()))
@@ -17,7 +17,7 @@ struct InterlessApp: App {
     var body: some Scene {
         WindowGroup("Interless") {
             WorkspaceShell()
-                .environmentObject(session)
+                .environment(session)
                 .frame(minWidth: 1100, minHeight: 720)
                 .ignoresSafeArea(.container, edges: .top)   // content extends under the floating top bar
                 .task {
@@ -108,7 +108,7 @@ struct InterlessApp: App {
 }
 
 private struct WorkspaceShell: View {
-    @EnvironmentObject private var session: WorkspaceSessionModel
+    @Environment(WorkspaceSessionModel.self) private var session
     @AppStorage("appearance.mode") private var appearanceModeRaw: String = AppearanceMode.system.rawValue
 
     private var appearanceMode: AppearanceMode {
@@ -116,7 +116,8 @@ private struct WorkspaceShell: View {
     }
 
     var body: some View {
-        WorkspaceView(
+        @Bindable var session = session
+        return WorkspaceView(
             state: session.viewState,
             chatDraft: $session.chatDraft,
             searchQuery: $session.searchQuery,

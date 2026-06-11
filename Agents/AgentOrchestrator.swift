@@ -84,7 +84,11 @@ public actor AgentOrchestrator: Agent {
         let retryPolicy = self.retryPolicy
         let router = self.router
 
-        return AsyncThrowingStream(AgentEvent.self, bufferingPolicy: .unbounded) { continuation in
+        // Bounded: a stalled consumer drops oldest-undelivered events instead of
+        // growing without limit. Terminal events are newest (kept), and the
+        // `.completed` payload carries the full text, so the transcript
+        // self-repairs even if token chunks were dropped under extreme lag.
+        return AsyncThrowingStream(AgentEvent.self, bufferingPolicy: .bufferingNewest(256)) { continuation in
             let taskHandle = Task {
                 do {
                     try Task.checkCancellation()

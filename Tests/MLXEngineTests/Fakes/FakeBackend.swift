@@ -30,6 +30,8 @@ actor FakeBackend: InferenceBackend {
 
     // MARK: Recorded state
     private(set) var loadCallCount = 0
+    private(set) var loadedDraftIDs: [String] = []
+    private(set) var unloadedDraftRoles: [ModelRole] = []
     private(set) var unloadedRoles: [ModelRole] = []
     private(set) var clearedKVRoles: [ModelRole] = []
     private(set) var generationCancelled = false
@@ -58,6 +60,20 @@ actor FakeBackend: InferenceBackend {
         if loadDelay > .zero { try? await Task.sleep(for: loadDelay) }
         progressHandler?(1)
         return LoadedModelHandle(role: role, id: id, quantization: quantization)
+    }
+
+    func loadDraftModel(
+        id: String,
+        forRole role: ModelRole,
+        quantization: QuantizationLevel,
+        progressHandler: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> LoadedModelHandle {
+        loadedDraftIDs.append(id)
+        return LoadedModelHandle(role: role, id: id, quantization: quantization)
+    }
+
+    func unloadDraftModel(forRole role: ModelRole) async {
+        unloadedDraftRoles.append(role)
     }
 
     nonisolated func generate(

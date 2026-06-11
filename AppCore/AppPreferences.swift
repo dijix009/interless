@@ -25,6 +25,8 @@ public final class AppPreferences {
         static let persistPromptHistory = "persistPromptHistory"
         static let maxToolIterations = "maxToolIterations"
         static let resourceProfile = "resourceProfile"
+        static let enableSpeculativeDecoding = "enableSpeculativeDecoding"
+        static let speculativeDraftModelID = "speculativeDraftModelID"
         static let reasoningEffort = "reasoningEffort"
         static let plainChatMaxAnswerTokens = "plainChatMaxAnswerTokens"
         static let codeChatMaxAnswerTokens = "codeChatMaxAnswerTokens"
@@ -113,7 +115,9 @@ public final class AppPreferences {
                 allowNetworkTools: defaults.bool(forKey: Key.allowNetworkTools),
                 persistPromptHistory: defaults.object(forKey: Key.persistPromptHistory) as? Bool ?? true,
                 maxToolIterations: defaults.object(forKey: Key.maxToolIterations) as? Int ?? 4,
-                resourceProfile: defaults.string(forKey: Key.resourceProfile).flatMap(ResourceProfile.init(rawValue:)) ?? .automatic)
+                resourceProfile: defaults.string(forKey: Key.resourceProfile).flatMap(ResourceProfile.init(rawValue:)) ?? .automatic,
+                enableSpeculativeDecoding: defaults.bool(forKey: Key.enableSpeculativeDecoding),
+                speculativeDraftModelID: defaults.string(forKey: Key.speculativeDraftModelID) ?? "")
         }
         set {
             defaults.set(newValue.orchestratorModelID, forKey: Key.orchestratorModelID)
@@ -128,6 +132,8 @@ public final class AppPreferences {
             defaults.set(newValue.persistPromptHistory, forKey: Key.persistPromptHistory)
             defaults.set(newValue.maxToolIterations, forKey: Key.maxToolIterations)
             defaults.set(newValue.resourceProfile.rawValue, forKey: Key.resourceProfile)
+            defaults.set(newValue.enableSpeculativeDecoding, forKey: Key.enableSpeculativeDecoding)
+            defaults.set(newValue.speculativeDraftModelID, forKey: Key.speculativeDraftModelID)
         }
     }
 

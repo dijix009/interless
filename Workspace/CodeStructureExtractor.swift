@@ -204,15 +204,8 @@ public struct SwiftCodeStructureExtractor: CodeStructureExtractor {
 
     private static func symbols(in line: String, lineNumber: Int) -> [CodeSymbol] {
         var symbols: [CodeSymbol] = []
-        let patterns: [(String, String)] = [
-            (#"\b(struct|class|enum|protocol|actor)\s+(`?[A-Za-z_][A-Za-z0-9_]*`?)"#, "type"),
-            (#"\bextension\s+(`?[A-Za-z_][A-Za-z0-9_\.]*`?)"#, "extension"),
-            (#"\bfunc\s+(`?[A-Za-z_][A-Za-z0-9_]*`?)\s*\("#, "function"),
-            (#"\binit\s*\("#, "initializer"),
-            (#"\b(?:let|var)\s+(`?[A-Za-z_][A-Za-z0-9_]*`?)"#, "property"),
-        ]
-        for (pattern, kind) in patterns {
-            for match in regex(pattern).matches(in: line, range: NSRange(line.startIndex..., in: line)) {
+        for (regex, kind) in Self.symbolRegexes {
+            for match in regex.matches(in: line, range: NSRange(line.startIndex..., in: line)) {
                 let name: String
                 let column: Int
                 if kind == "initializer" {
@@ -231,22 +224,22 @@ public struct SwiftCodeStructureExtractor: CodeStructureExtractor {
 
     private static func references(in line: String, lineNumber: Int) -> [CodeReference] {
         var references: [CodeReference] = []
-        for match in regex(#"\bimport\s+([A-Za-z_][A-Za-z0-9_\.]*)"#).matches(in: line, range: NSRange(line.startIndex..., in: line)) {
+        for match in Self.importRegex.matches(in: line, range: NSRange(line.startIndex..., in: line)) {
             let range = match.range(at: 1)
             references.append(CodeReference(name: substring(line, range), kind: "import", line: lineNumber, column: column(for: range, in: line)))
         }
-        for match in regex(#"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("#).matches(in: line, range: NSRange(line.startIndex..., in: line)) {
+        for match in Self.callRegex.matches(in: line, range: NSRange(line.startIndex..., in: line)) {
             let range = match.range(at: 1)
             let name = substring(line, range)
             if !Self.callKeywords.contains(name) {
                 references.append(CodeReference(name: name, kind: "call", line: lineNumber, column: column(for: range, in: line)))
             }
         }
-        for match in regex(#"\b[A-Z][A-Za-z0-9_]*\b"#).matches(in: line, range: NSRange(line.startIndex..., in: line)) {
+        for match in Self.typeReferenceRegex.matches(in: line, range: NSRange(line.startIndex..., in: line)) {
             let name = substring(line, match.range)
             references.append(CodeReference(name: name, kind: "type", line: lineNumber, column: column(for: match.range, in: line)))
         }
-        for match in regex(#"\b[A-Za-z_][A-Za-z0-9_]*\b"#).matches(in: line, range: NSRange(line.startIndex..., in: line)) {
+        for match in Self.identifierRegex.matches(in: line, range: NSRange(line.startIndex..., in: line)) {
             let name = substring(line, match.range)
             if !Self.identifierKeywords.contains(name) {
                 references.append(CodeReference(name: name, kind: "identifier", line: lineNumber, column: column(for: match.range, in: line)))
@@ -321,10 +314,26 @@ public struct SwiftCodeStructureExtractor: CodeStructureExtractor {
     ]
     private static let callKeywords: Set<String> = identifierKeywords.union(["if", "for", "while", "switch", "guard"])
 
-    private static func regex(_ pattern: String) -> NSRegularExpression {
-        // Patterns are compile-time constants; failure indicates a programmer error.
-        try! NSRegularExpression(pattern: pattern)
+    private static func makeRegex(_ pattern: String) -> NSRegularExpression {
+        // Patterns are compile-time constants and back the static caches below
+        // (compiled once, not per line). Fall back to a valid never-match pattern
+        // rather than `try!`, so a typo can never crash indexing.
+        if let regex = try? NSRegularExpression(pattern: pattern) { return regex }
+        return (try? NSRegularExpression(pattern: "(?!)")) ?? NSRegularExpression()
     }
+
+    // Compiled once and reused across every line (was: recompiled per line).
+    private static let symbolRegexes: [(NSRegularExpression, String)] = [
+        (makeRegex(#"\b(struct|class|enum|protocol|actor)\s+(`?[A-Za-z_][A-Za-z0-9_]*`?)"#), "type"),
+        (makeRegex(#"\bextension\s+(`?[A-Za-z_][A-Za-z0-9_\.]*`?)"#), "extension"),
+        (makeRegex(#"\bfunc\s+(`?[A-Za-z_][A-Za-z0-9_]*`?)\s*\("#), "function"),
+        (makeRegex(#"\binit\s*\("#), "initializer"),
+        (makeRegex(#"\b(?:let|var)\s+(`?[A-Za-z_][A-Za-z0-9_]*`?)"#), "property"),
+    ]
+    private static let importRegex = makeRegex(#"\bimport\s+([A-Za-z_][A-Za-z0-9_\.]*)"#)
+    private static let callRegex = makeRegex(#"\b([A-Za-z_][A-Za-z0-9_]*)\s*\("#)
+    private static let typeReferenceRegex = makeRegex(#"\b[A-Z][A-Za-z0-9_]*\b"#)
+    private static let identifierRegex = makeRegex(#"\b[A-Za-z_][A-Za-z0-9_]*\b"#)
 
     private static func substring(_ string: String, _ range: NSRange) -> String {
         guard let range = Range(range, in: string) else { return "" }

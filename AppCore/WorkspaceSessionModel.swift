@@ -1,5 +1,5 @@
-import Combine
 import Foundation
+import Observation
 import Agents
 import Core
 import InterlessSecurity
@@ -15,51 +15,52 @@ private struct MessageGenerationStats {
 }
 
 @MainActor
-public final class WorkspaceSessionModel: ObservableObject {
-    @Published public private(set) var workspaceURL: URL?
-    @Published public private(set) var indexingProgress: IndexingProgress?
-    @Published public private(set) var fileTree: [FileTreeNode] = []
-    @Published public private(set) var selectedFilePath: String?
-    @Published public private(set) var selectedFileText = ""
-    @Published public private(set) var selectedFilePreview: FilePreviewViewState = .empty
-    @Published public var fileTreeFilter = ""
-    @Published public private(set) var expandedFileTreePaths: Set<String>
-    @Published public var searchQuery = ""
-    @Published public private(set) var searchHits: [SearchHit] = []
-    @Published public private(set) var gitStatus: GitStatus = .notARepository
-    @Published public private(set) var diffLines: [DiffLine] = []
-    @Published public private(set) var diffFiles: [DiffFile] = []
-    @Published public private(set) var chatMessages: [ChatMessageViewState] = []
-    @Published public private(set) var chatThreads: [ChatThreadViewState] = []
-    @Published public private(set) var globalChatThreads: [ChatThreadViewState] = []
-    @Published public private(set) var modelStatus: ModelLoadStatus = .idle
-    @Published public private(set) var modelDownloadProgress: ModelDownloadProgressViewState?
-    @Published public private(set) var availableChatModelIDs: [String]
-    @Published public private(set) var notices: [AppNotice] = []
-    @Published public private(set) var activities: [WorkspaceActivity] = []
-    @Published public private(set) var focusTarget: WorkspaceFocusTarget = .none
-    @Published public private(set) var patchProposal: PatchProposal?
-    @Published public var isPatchReviewPresented = false
-    @Published public private(set) var modelOnboarding: ModelOnboardingViewState
-    @Published public var layout: WorkspaceLayoutPreferences {
+@Observable
+public final class WorkspaceSessionModel {
+    public private(set) var workspaceURL: URL?
+    public private(set) var indexingProgress: IndexingProgress?
+    public private(set) var fileTree: [FileTreeNode] = []
+    public private(set) var selectedFilePath: String?
+    public private(set) var selectedFileText = ""
+    public private(set) var selectedFilePreview: FilePreviewViewState = .empty
+    public var fileTreeFilter = ""
+    public private(set) var expandedFileTreePaths: Set<String>
+    public var searchQuery = ""
+    public private(set) var searchHits: [SearchHit] = []
+    public private(set) var gitStatus: GitStatus = .notARepository
+    public private(set) var diffLines: [DiffLine] = []
+    public private(set) var diffFiles: [DiffFile] = []
+    public private(set) var chatMessages: [ChatMessageViewState] = []
+    public private(set) var chatThreads: [ChatThreadViewState] = []
+    public private(set) var globalChatThreads: [ChatThreadViewState] = []
+    public private(set) var modelStatus: ModelLoadStatus = .idle
+    public private(set) var modelDownloadProgress: ModelDownloadProgressViewState?
+    public private(set) var availableChatModelIDs: [String]
+    public private(set) var notices: [AppNotice] = []
+    public private(set) var activities: [WorkspaceActivity] = []
+    public private(set) var focusTarget: WorkspaceFocusTarget = .none
+    public private(set) var patchProposal: PatchProposal?
+    public var isPatchReviewPresented = false
+    public private(set) var modelOnboarding: ModelOnboardingViewState
+    public var layout: WorkspaceLayoutPreferences {
         didSet { preferences.layoutPreferences = layout }
     }
-    @Published public var chatDraft = ""
-    @Published public var isSettingsPresented = false
-    @Published public var isHealthPresented = false
-    @Published public private(set) var healthState = HealthStatusViewState()
-    @Published public private(set) var lastDiagnosticsExport: DiagnosticsExportViewState?
-    @Published public private(set) var configStatus = ConfigStatusViewState()
-    @Published public private(set) var permissionPrompt: PermissionPromptViewState?
-    @Published public private(set) var questionPrompt: QuestionPromptViewState?
-    @Published public private(set) var todoPanel = TodoPanelViewState()
-    @Published public private(set) var backgroundToolJobs: [BackgroundToolJobViewState] = []
-    @Published public private(set) var sessionTimelineItems: [SessionTimelineItemViewState] = []
-    @Published public private(set) var selectedReasoningEffort: ReasoningEffort = .none
-    @Published public private(set) var modelContextSettings: ModelContextSettingsViewState {
+    public var chatDraft = ""
+    public var isSettingsPresented = false
+    public var isHealthPresented = false
+    public private(set) var healthState = HealthStatusViewState()
+    public private(set) var lastDiagnosticsExport: DiagnosticsExportViewState?
+    public private(set) var configStatus = ConfigStatusViewState()
+    public private(set) var permissionPrompt: PermissionPromptViewState?
+    public private(set) var questionPrompt: QuestionPromptViewState?
+    public private(set) var todoPanel = TodoPanelViewState()
+    public private(set) var backgroundToolJobs: [BackgroundToolJobViewState] = []
+    public private(set) var sessionTimelineItems: [SessionTimelineItemViewState] = []
+    public private(set) var selectedReasoningEffort: ReasoningEffort = .none
+    public private(set) var modelContextSettings: ModelContextSettingsViewState {
         didSet { preferences.modelContextSettings = modelContextSettings.normalized() }
     }
-    @Published public var settings: ModelSettingsViewState {
+    public var settings: ModelSettingsViewState {
         didSet {
             preferences.modelSettings = settings
             clampReasoningEffortForCurrentModel()
@@ -85,17 +86,33 @@ public final class WorkspaceSessionModel: ObservableObject {
     private var currentConversationMode: ConversationMode?
     private var currentConversationWorkspacePath: String?
     private var visibleConversationMode: ConversationMode = .code
-    private var reindexTask: Task<Void, Never>?
-    private var watchTask: Task<Void, Never>?
-    private var configWatchTask: Task<Void, Never>?
-    private var chatTask: Task<Void, Never>?
-    private var modelLoadTask: Task<Void, Error>?
-    private var activeModelLoadID: UUID?
-    private var cancelledModelLoadIDs: Set<UUID> = []
-    private var generationStats: [UUID: MessageGenerationStats] = [:]
-    private var permissionContinuations: [UUID: CheckedContinuation<ToolPermissionResolution, Never>] = [:]
-    private var questionContinuations: [UUID: CheckedContinuation<ToolQuestionResponse, Error>] = [:]
-    private var didAttemptRestore = false
+    @ObservationIgnored private var reindexTask: Task<Void, Never>?
+    @ObservationIgnored private var watchTask: Task<Void, Never>?
+    @ObservationIgnored private var configWatchTask: Task<Void, Never>?
+    @ObservationIgnored private var chatTask: Task<Void, Never>?
+    @ObservationIgnored private var modelLoadTask: Task<Void, Error>?
+    @ObservationIgnored private var activeModelLoadID: UUID?
+    @ObservationIgnored private var cancelledModelLoadIDs: Set<UUID> = []
+    @ObservationIgnored private var generationStats: [UUID: MessageGenerationStats] = [:]
+    /// Per-assistant buffered streamed text, applied to the transcript in coalesced
+    /// flushes (~every `tokenFlushThresholdCharacters`) instead of once per token,
+    /// to cut MainActor publishes / viewState rebuilds during streaming.
+    @ObservationIgnored private var pendingStreamedText: [UUID: String] = [:]
+    /// Memoized context-usage meter. Stable during token streaming (the streaming
+    /// message is excluded from the estimate), so this avoids the O(transcript)
+    /// scan on every streamed chunk; recomputed only when the signature changes.
+    @ObservationIgnored private var contextUsageCache: (signature: Int, value: (label: String, fraction: Double))?
+    /// Memoized file-tree derivations: `viewState` previously re-walked the whole
+    /// tree twice (filter + visible rows, up to ~20k nodes) on every rebuild —
+    /// i.e. on every coalesced token flush. Invalidated by tree version/filter/
+    /// expansion changes only.
+    @ObservationIgnored private var fileTreeVersion = 0
+    @ObservationIgnored private var treeDerivationCache:
+        (version: Int, filter: String, expanded: Set<String>, filtered: [FileTreeNode], rows: [FileTreeVisibleRow])?
+    private static let tokenFlushThresholdCharacters = 32
+    @ObservationIgnored private var permissionContinuations: [UUID: CheckedContinuation<ToolPermissionResolution, Never>] = [:]
+    @ObservationIgnored private var questionContinuations: [UUID: CheckedContinuation<ToolQuestionResponse, Error>] = [:]
+    @ObservationIgnored private var didAttemptRestore = false
 
     public init(
         preferences: AppPreferences = AppPreferences(),
@@ -151,7 +168,7 @@ public final class WorkspaceSessionModel: ObservableObject {
             chrome: workspaceChrome,
             workspacePath: workspaceURL?.path,
             indexingSummary: indexingSummary,
-            fileTree: FileTreeNode.filtered(nodes: fileTree, query: fileTreeFilter),
+            fileTree: fileTreeDerivations().filtered,
             fileTreeFilter: fileTreeFilter,
             selectedFilePath: selectedFilePath,
             selectedFileText: selectedFileText,
@@ -172,10 +189,7 @@ public final class WorkspaceSessionModel: ObservableObject {
             layout: layout,
             patchProposal: patchProposal,
             isPatchReviewPresented: isPatchReviewPresented,
-            fileTreeRows: FileTreeModel.visibleRows(
-                nodes: fileTree,
-                expandedPaths: expandedFileTreePaths,
-                filter: fileTreeFilter),
+            fileTreeRows: fileTreeDerivations().rows,
             expandedFileTreePaths: expandedFileTreePaths,
             modelOnboarding: modelOnboarding,
             availableChatModelIDs: availableChatModelIDs,
@@ -1344,6 +1358,7 @@ public final class WorkspaceSessionModel: ObservableObject {
         guard let environment else { return }
         do {
             fileTree = try await environment.fileTree()
+            fileTreeVersion += 1
         } catch {
             appendNotice(severity: .error, title: "File tree failed", message: String(describing: error))
         }
@@ -1362,11 +1377,14 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func handleAgentEvent(_ event: AgentEvent, assistantID: UUID, sessionID: UUID?) {
+        // Flush buffered streamed text before any non-token event mutates the
+        // transcript, so ordering with tool/route/completion events is preserved.
+        if case .token = event {} else { flushPendingStreamedText(id: assistantID) }
         switch event {
         case .token(let chunk):
             updateGenerationStats(for: assistantID, chunk: chunk)
             if !chunk.text.isEmpty {
-                appendToMessage(id: assistantID, text: chunk.text)
+                bufferStreamedText(id: assistantID, text: chunk.text)
             }
         case .toolIterationStarted(let iteration):
             let id = appendTool("Tool iteration \(iteration)")
@@ -1429,11 +1447,12 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func handlePlainChatEvent(_ event: AgentEvent, assistantID: UUID, sessionID: UUID?) {
+        if case .token = event {} else { flushPendingStreamedText(id: assistantID) }
         switch event {
         case .token(let chunk):
             updateGenerationStats(for: assistantID, chunk: chunk)
             if !chunk.text.isEmpty {
-                appendToMessage(id: assistantID, text: chunk.text)
+                bufferStreamedText(id: assistantID, text: chunk.text)
             }
         case .completed(let result):
             updateGenerationSpeed(for: assistantID, info: result.completionInfo)
@@ -1452,6 +1471,24 @@ public final class WorkspaceSessionModel: ObservableObject {
     private func appendToMessage(id: UUID, text: String) {
         guard let index = chatMessages.firstIndex(where: { $0.id == id }) else { return }
         chatMessages[index].text += text
+        trimChatTranscript()
+    }
+
+    /// Buffer a streamed chunk; apply to the transcript only once enough text has
+    /// accumulated, so most tokens cost a cheap dictionary append rather than a
+    /// `@Published` mutation + transcript trim + viewState rebuild.
+    private func bufferStreamedText(id: UUID, text: String) {
+        pendingStreamedText[id, default: ""] += text
+        if (pendingStreamedText[id]?.utf8.count ?? 0) >= Self.tokenFlushThresholdCharacters {
+            flushPendingStreamedText(id: id)
+        }
+    }
+
+    /// Apply any buffered streamed text for `id` to the transcript in one mutation.
+    private func flushPendingStreamedText(id: UUID) {
+        guard let pending = pendingStreamedText.removeValue(forKey: id), !pending.isEmpty else { return }
+        guard let index = chatMessages.firstIndex(where: { $0.id == id }) else { return }
+        chatMessages[index].text += pending
         trimChatTranscript()
     }
 
@@ -1503,6 +1540,7 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func finishStreamingMessage(id: UUID) {
+        flushPendingStreamedText(id: id)
         guard let index = chatMessages.firstIndex(where: { $0.id == id }) else { return }
         if chatMessages[index].tokensPerSecond == nil,
            let speed = resolvedTokensPerSecond(for: id, info: nil) {
@@ -1707,6 +1745,10 @@ public final class WorkspaceSessionModel: ObservableObject {
     }
 
     private func estimatedContextWindowUsage() -> (label: String, fraction: Double) {
+        let signature = contextUsageSignature()
+        if let cache = contextUsageCache, cache.signature == signature {
+            return cache.value
+        }
         let mode = visibleConversationMode
         let role: ModelRole = settings.usesSingleAgentMode() ? .orchestrator : (mode == .chat ? .utility : .orchestrator)
         let tokenBudget = effectiveContextTokenCap(isPlainChat: mode == .chat, role: role)
@@ -1714,7 +1756,45 @@ public final class WorkspaceSessionModel: ObservableObject {
             messages: chatMessages,
             draft: chatDraft)
         let fraction = min(max(Double(tokenEstimate) / Double(max(1, tokenBudget)), 0), 1)
-        return (Self.formatContextUsageLabel(fraction), fraction)
+        let value = (Self.formatContextUsageLabel(fraction), fraction)
+        contextUsageCache = (signature, value)
+        return value
+    }
+
+    /// Returns the filtered tree + visible rows, recomputing only when the tree
+    /// version, filter, or expansion set changed — never on token flushes.
+    private func fileTreeDerivations() -> (filtered: [FileTreeNode], rows: [FileTreeVisibleRow]) {
+        if let cache = treeDerivationCache,
+           cache.version == fileTreeVersion,
+           cache.filter == fileTreeFilter,
+           cache.expanded == expandedFileTreePaths {
+            return (cache.filtered, cache.rows)
+        }
+        let filtered = FileTreeNode.filtered(nodes: fileTree, query: fileTreeFilter)
+        let rows = FileTreeModel.visibleRows(
+            nodes: fileTree,
+            expandedPaths: expandedFileTreePaths,
+            filter: fileTreeFilter)
+        treeDerivationCache = (fileTreeVersion, fileTreeFilter, expandedFileTreePaths, filtered, rows)
+        return (filtered, rows)
+    }
+
+    /// Cheap signature for the context-usage memo. O(messageCount) — `utf8.count`
+    /// is O(1) — and excludes streaming messages, so it stays constant while a
+    /// message streams (the estimate ignores in-flight messages anyway).
+    private func contextUsageSignature() -> Int {
+        var hasher = Hasher()
+        hasher.combine(chatMessages.count)
+        for message in chatMessages where !message.isStreaming {
+            hasher.combine(message.id)
+            hasher.combine(message.text.utf8.count)
+        }
+        let isPlainChat = visibleConversationMode == .chat
+        hasher.combine(chatDraft)
+        hasher.combine(isPlainChat)
+        hasher.combine(effectiveContextTokenCap(isPlainChat: isPlainChat))
+        hasher.combine(modelContextSettings.conversationContextMode(isPlainChat: isPlainChat))
+        return hasher.finalize()
     }
 
     private func estimatedContextTokens(
@@ -1916,12 +1996,15 @@ public final class WorkspaceSessionModel: ObservableObject {
 
     private func trimChatTranscript() {
         let budget = ResourceBudget.resolved(for: settings.resourceProfile)
-        var total = chatMessages.reduce(0) { $0 + $1.text.count }
+        // `utf8.count` is O(1) per String (native storage), so this scan is
+        // O(messageCount) rather than O(totalCharacters) of a grapheme `.count`.
+        // It slightly over-counts multibyte text, which only trims a touch earlier.
+        var total = chatMessages.reduce(0) { $0 + $1.text.utf8.count }
         while total > budget.chatTranscriptRetainedCharacters,
               let first = chatMessages.first,
               !first.isStreaming,
               chatMessages.count > 2 {
-            total -= first.text.count
+            total -= first.text.utf8.count
             chatMessages.removeFirst()
         }
 
@@ -2080,7 +2163,14 @@ public final class WorkspaceSessionModel: ObservableObject {
 
     private func publish(_ event: AppEvent) async {
         await eventBus.publish(event)
-        await refreshHealthStatus()
+        // The health snapshot fan-out (events + scheduler + metrics + recovery +
+        // memory policy + durable cursors) is expensive and rebuilds the whole
+        // health view state. Only do it while the panel is visible — openHealth()
+        // refreshes explicitly, so the panel still populates on open. This stops a
+        // closed Health panel from forcing a refresh on nearly every operation.
+        if isHealthPresented {
+            await refreshHealthStatus()
+        }
     }
 
     private func durableEventCursorStates(
@@ -2384,7 +2474,9 @@ public final class WorkspaceSessionModel: ObservableObject {
             ])
             let currentEnvironment = environment ?? chatOnlyEnvironment
             let builder = Self.conversationContextBuilder(sessionStore: sessionStore, environment: currentEnvironment)
-            Task.detached {
+            // Background embedding/index work runs at .utility so it cannot contend
+            // with the .userInitiated token-generation loop.
+            Task.detached(priority: .utility) {
                 await builder.indexMessagePart(part)
             }
         } catch {

@@ -159,9 +159,42 @@ public actor InferenceController {
         return try await backend.embed(texts: texts, handle: handle)
     }
 
+    /// Load a speculative-decoding draft model for the orchestrator, gated on the
+    /// resolved profile and current memory headroom. Returns `false` (without
+    /// throwing) when the gate declines — speculative decoding is purely opt-in
+    /// and must never block normal chat.
+    @discardableResult
+    public func loadDraftModel(
+        id: String,
+        quantization: QuantizationLevel = .q4,
+        progressHandler: (@Sendable (_ modelID: String, _ fractionCompleted: Double) -> Void)? = nil
+    ) async throws -> Bool {
+        let state = await memoryCoordinator.currentState()
+        guard state.resolvedProfile == .largeRAM else {
+            log.notice("draft model skipped: profile \(state.resolvedProfile.rawValue, privacy: .public) is not largeRAM")
+            return false
+        }
+        // An extra resident model: require headroom below the unload watermark.
+        let snapshot = await currentMemoryUsage()
+        guard snapshot.usedFraction < MemoryThresholds.default.unloadUtilityModel else {
+            log.notice("draft model skipped: memory at \(snapshot.usedFraction, format: .fixed(precision: 2))")
+            return false
+        }
+        try await loadGate.wait()
+        defer { loadGate.signal() }
+        _ = try await backend.loadDraftModel(
+            id: id,
+            forRole: .orchestrator,
+            quantization: quantization,
+            progressHandler: { fraction in progressHandler?(id, min(1, max(0, fraction))) })
+        log.info("draft model loaded id=\(id, privacy: .public)")
+        return true
+    }
+
     public func unload(role: ModelRole) async {
         guard handles[role] != nil else { return }
         handles[role] = nil
+        await backend.unloadDraftModel(forRole: role)
         await backend.unload(role: role)
         log.info("unloaded role=\(role.rawValue, privacy: .public)")
     }
@@ -229,6 +262,9 @@ public actor InferenceController {
         if request.role != .orchestrator {
             copy.reuseKVCache = false
         }
+        // Resolve engine tuning (KV-cache policy, prefill, memory caps) from the
+        // active budget unless the request already carries an override.
+        copy.engineTuning = request.engineTuning ?? budget.engineTuning
         return copy
     }
 }
@@ -249,6 +285,9 @@ extension InferenceController: MemoryActionHandler {
         case .reduceContext:
             log.notice("memory pressure: reduce context (advisory; enforced per-request)")
         case .unloadUtilityModel:
+            // Shed the (optional) speculative draft with the utility model: both
+            // are accelerators, never required for correctness.
+            await backend.unloadDraftModel(forRole: .orchestrator)
             await unload(role: .utility)
         case .rejectInference:
             log.notice("memory pressure: new inference will be rejected at the 95% watermark")
