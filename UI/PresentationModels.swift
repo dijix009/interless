@@ -1793,6 +1793,10 @@ public struct ModelSettingsViewState: Sendable, Equatable, Codable {
     public var persistPromptHistory: Bool
     public var maxToolIterations: Int
     public var resourceProfile: ResourceProfile
+    /// Speculative decoding (large-RAM only): a small draft model proposing
+    /// tokens the orchestrator verifies. Both models must share a tokenizer.
+    public var enableSpeculativeDecoding: Bool
+    public var speculativeDraftModelID: String
 
     public init(
         orchestratorModelID: String = "",
@@ -1806,7 +1810,9 @@ public struct ModelSettingsViewState: Sendable, Equatable, Codable {
         allowNetworkTools: Bool = false,
         persistPromptHistory: Bool = true,
         maxToolIterations: Int = 4,
-        resourceProfile: ResourceProfile = .automatic
+        resourceProfile: ResourceProfile = .automatic,
+        enableSpeculativeDecoding: Bool = false,
+        speculativeDraftModelID: String = ""
     ) {
         self.orchestratorModelID = orchestratorModelID
         self.utilityModelID = utilityModelID
@@ -1820,6 +1826,8 @@ public struct ModelSettingsViewState: Sendable, Equatable, Codable {
         self.persistPromptHistory = persistPromptHistory
         self.maxToolIterations = max(0, maxToolIterations)
         self.resourceProfile = resourceProfile
+        self.enableSpeculativeDecoding = enableSpeculativeDecoding
+        self.speculativeDraftModelID = speculativeDraftModelID
     }
 
     public func usesSingleAgentMode(

@@ -212,6 +212,15 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                 await resolvedController.unload(role: .orchestrator)
                 await resolvedController.unload(role: .utility)
                 await resolvedController.unload(role: .embeddings)
+                // Opt-in speculative decoding: best-effort draft load after the
+                // orchestrator. The controller gates on largeRAM + memory headroom
+                // and a tokenizer-compat probe; failure never blocks chat.
+                func loadDraftIfEnabled() async {
+                    let draftID = runtimeSettings.speculativeDraftModelID
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard runtimeSettings.enableSpeculativeDecoding, !draftID.isEmpty else { return }
+                    _ = try? await resolvedController.loadDraftModel(id: draftID)
+                }
                 if singleAgentMode {
                     try await resolvedController.loadModel(
                         id: singleModelID,
@@ -219,6 +228,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                         quantization: runtimeSettings.orchestratorQuantization,
                         toolCallFormat: runtimeSettings.toolCallFormat,
                         progressHandler: progressReporter)
+                    await loadDraftIfEnabled()
                     return
                 }
                 try await resolvedController.loadModel(
@@ -227,6 +237,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                     quantization: runtimeSettings.orchestratorQuantization,
                     toolCallFormat: runtimeSettings.toolCallFormat,
                     progressHandler: progressReporter)
+                await loadDraftIfEnabled()
                 try await resolvedController.loadModel(
                     id: utilityModelID,
                     role: .utility,

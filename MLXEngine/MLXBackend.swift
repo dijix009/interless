@@ -19,20 +19,8 @@ import Tokenizers
 /// Implemented as an `actor` to serialize access to its `models` dictionary.
 public actor MLXBackend: InferenceBackend {
 
-    /// Reference box so a (non-`Sendable`) `[KVCache]` can persist across
-    /// `ModelContainer.perform` calls. The cache is only mutated inside
-    /// `perform` (serialized by the container); the lock guards the rare
-    /// cross-context `clearKVCache`.
-    private final class KVCacheBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var cache: [KVCache]?
-        func get() -> [KVCache]? { lock.withLock { cache } }
-        func set(_ newValue: [KVCache]?) { lock.withLock { cache = newValue } }
-    }
-
     private struct Loaded {
         let container: ModelContainer
-        let cacheBox: KVCacheBox
         let handle: LoadedModelHandle
     }
 
@@ -41,8 +29,26 @@ public actor MLXBackend: InferenceBackend {
         let handle: LoadedModelHandle
     }
 
+    /// Locked box holding the speculative draft's (non-`Sendable`) `ModelContext`
+    /// so it can be used inside the *target* container's `perform` closure. Safe
+    /// because the draft is only ever touched during its target's generation,
+    /// which the controller's orchestrator gate serializes.
+    private final class DraftContextBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var context: ModelContext?
+        func set(_ newValue: ModelContext?) { lock.withLock { context = newValue } }
+        func get() -> ModelContext? { lock.withLock { context } }
+    }
+
+    private struct LoadedDraft {
+        let container: ModelContainer
+        let box: DraftContextBox
+        let handle: LoadedModelHandle
+    }
+
     private var models: [ModelRole: Loaded] = [:]
     private var embedders: [ModelRole: LoadedEmbedder] = [:]
+    private var drafts: [ModelRole: LoadedDraft] = [:]
     private let engineTuning: EngineTuning
     private var didConfigureMLXMemory = false
     private let log = Logger(subsystem: "dev.interless", category: "inference")
@@ -109,7 +115,7 @@ public actor MLXBackend: InferenceBackend {
             )
         }
         let handle = LoadedModelHandle(role: role, id: id, quantization: quantization)
-        models[role] = Loaded(container: container, cacheBox: KVCacheBox(), handle: handle)
+        models[role] = Loaded(container: container, handle: handle)
         return handle
     }
 
@@ -190,9 +196,72 @@ public actor MLXBackend: InferenceBackend {
         }
     }
 
+    public func loadDraftModel(
+        id: String,
+        forRole role: ModelRole,
+        quantization: QuantizationLevel,
+        progressHandler: (@Sendable (Double) -> Void)? = nil
+    ) async throws -> LoadedModelHandle {
+        try configureMLXMemoryIfNeeded()
+        // The target must be loaded first — the draft is validated against its tokenizer.
+        guard let target = models[role] else {
+            throw InferenceError.modelNotLoaded(role)
+        }
+        if let advertisedBits = QuantizationLevel.advertisedBits(inRepoID: id),
+           advertisedBits != quantization.bitWidth {
+            throw InferenceError.quantizationMismatch(expected: quantization, repo: id)
+        }
+        let log = self.log
+        let container = try await MLX.withError {
+            try await LLMModelFactory.shared.loadContainer(
+                from: #hubDownloader(),
+                using: #huggingFaceTokenizerLoader(),
+                configuration: ModelConfiguration(id: id),
+                progressHandler: { progress in
+                    let fraction = Self.clampedProgress(progress.fractionCompleted)
+                    progressHandler?(fraction)
+                    log.debug("draft download \(id, privacy: .public) \(Int(fraction * 100))%")
+                }
+            )
+        }
+        // Speculative decoding requires identical tokenization: probe both
+        // tokenizers with the same string and require identical ids + EOS.
+        let probe = "interless speculative probe: func main(_ x: Int) -> [String] { return [\"42\"] }"
+        let targetProbe: ([Int], Int?) = await target.container.perform { context in
+            (context.tokenizer.encode(text: probe, addSpecialTokens: true), context.tokenizer.eosTokenId)
+        }
+        let box = DraftContextBox()
+        let draftProbe: ([Int], Int?) = await container.perform { context in
+            box.set(context)
+            return (context.tokenizer.encode(text: probe, addSpecialTokens: true), context.tokenizer.eosTokenId)
+        }
+        guard targetProbe == draftProbe else {
+            throw InferenceError.modelLoadFailed(
+                role: role,
+                underlying: "draft model \(id) tokenizer does not match the target model "
+                    + "(speculative decoding requires identical tokenizers)")
+        }
+        let handle = LoadedModelHandle(role: role, id: id, quantization: quantization)
+        drafts[role] = LoadedDraft(container: container, box: box, handle: handle)
+        log.info("loaded draft model \(id, privacy: .public) for role=\(role.rawValue, privacy: .public)")
+        return handle
+    }
+
+    public func unloadDraftModel(forRole role: ModelRole) async {
+        guard drafts[role] != nil else { return }
+        drafts[role] = nil
+        if didConfigureMLXMemory {
+            try? MLX.withError {
+                MLX.Memory.clearCache()
+            }
+        }
+        log.info("unloaded draft model for role=\(role.rawValue, privacy: .public)")
+    }
+
     public func unload(role: ModelRole) async {
         models[role] = nil
         embedders[role] = nil
+        drafts[role] = nil
         if didConfigureMLXMemory {
             try? MLX.withError {
                 MLX.Memory.clearCache()
@@ -204,7 +273,9 @@ public actor MLXBackend: InferenceBackend {
     }
 
     public func clearKVCache(role: ModelRole) async {
-        models[role]?.cacheBox.set(nil)
+        // Every generation already starts from a fresh KV cache (see
+        // runGeneration), so this action's remaining job is releasing the MLX
+        // buffer-recycle pool that grew during generation.
         if didConfigureMLXMemory {
             try? MLX.withError {
                 MLX.Memory.clearCache()
@@ -250,6 +321,11 @@ public actor MLXBackend: InferenceBackend {
             throw InferenceError.modelNotLoaded(request.role)
         }
         let container = loaded.container
+        // "Draft loaded" is the speculative-decoding signal — loading is gated by
+        // the controller (largeRAM + opt-in + memory watermark), so generation
+        // simply uses the draft whenever one is resident.
+        let draftBox = drafts[request.role]?.box
+        let numDraftTokens = (request.engineTuning ?? .default).speculativeDecoding.numDraftTokens
 
         // `perform` provides serialized access to the (non-Sendable) ModelContext.
         try await MLX.withError {
@@ -267,8 +343,19 @@ public actor MLXBackend: InferenceBackend {
                 // prefix-cache feature.)
                 let cache = context.model.newCache(parameters: params)
 
-                let stream = try MLXLMCommon.generate(
-                    input: lmInput, cache: cache, parameters: params, context: context)
+                let stream: AsyncStream<Generation>
+                if let draftContext = draftBox?.get() {
+                    // Speculative decoding: the draft proposes tokens, the target
+                    // verifies. Draft cache is ephemeral (nil → fresh per generation).
+                    stream = try MLXLMCommon.generate(
+                        input: lmInput, cache: cache, parameters: params, context: context,
+                        draftModel: draftContext.model,
+                        draftCache: nil,
+                        numDraftTokens: numDraftTokens)
+                } else {
+                    stream = try MLXLMCommon.generate(
+                        input: lmInput, cache: cache, parameters: params, context: context)
+                }
 
                 var index = 0
                 for await item in stream {

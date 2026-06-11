@@ -48,6 +48,21 @@ public protocol InferenceBackend: Sendable {
     /// Discard the role's KV cache so the next generation starts fresh.
     func clearKVCache(role: ModelRole) async
 
+    /// Load a speculative-decoding *draft* model attached to the model serving
+    /// `role` (orchestrator in practice). Conformers must validate the draft
+    /// shares the target's tokenizer and throw on mismatch. Subsequent
+    /// generations for `role` use the draft automatically; unloading is via
+    /// `unloadDraftModel(forRole:)` or `unload(role:)`.
+    func loadDraftModel(
+        id: String,
+        forRole role: ModelRole,
+        quantization: QuantizationLevel,
+        progressHandler: (@Sendable (Double) -> Void)?
+    ) async throws -> LoadedModelHandle
+
+    /// Unload `role`'s draft model (no-op when none is loaded).
+    func unloadDraftModel(forRole role: ModelRole) async
+
     /// Current MLX GPU allocator counters (active / cache / peak bytes).
     func gpuMemory() async -> GPUMemory
 
@@ -55,4 +70,19 @@ public protocol InferenceBackend: Sendable {
     /// (not read directly by the controller) so the §8 watermark policy can be
     /// exercised against a fake reading in unit tests.
     func footprint() async -> MemoryFootprint
+}
+
+public extension InferenceBackend {
+    /// Default: speculative decoding unsupported — backends opt in explicitly.
+    func loadDraftModel(
+        id: String,
+        forRole role: ModelRole,
+        quantization: QuantizationLevel,
+        progressHandler: (@Sendable (Double) -> Void)?
+    ) async throws -> LoadedModelHandle {
+        throw InferenceError.modelLoadFailed(
+            role: role, underlying: "speculative decoding is not supported by this backend")
+    }
+
+    func unloadDraftModel(forRole role: ModelRole) async {}
 }

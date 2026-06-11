@@ -119,6 +119,41 @@ struct MemoryExecutionTests {
         #expect(request.contextTokenBudget == ResourceBudget.smallRAM.utilityContextTokenBudget)
     }
 
+    @Test func draftModelLoadGatedByResolvedProfile() async throws {
+        let small = FakeBackend()
+        let smallController = InferenceController(backend: small, resourceProfile: .smallRAM)
+        try await smallController.loadModel(id: "m", role: .orchestrator, quantization: .q4)
+        #expect(try await smallController.loadDraftModel(id: "draft") == false)
+        #expect(await small.loadedDraftIDs.isEmpty)
+
+        let large = FakeBackend()
+        let largeController = InferenceController(backend: large, resourceProfile: .largeRAM)
+        try await largeController.loadModel(id: "m", role: .orchestrator, quantization: .q4)
+        #expect(try await largeController.loadDraftModel(id: "draft") == true)
+        #expect(await large.loadedDraftIDs == ["draft"])
+    }
+
+    @Test func memoryPressureShedsDraftModelWithUtility() async throws {
+        let fake = FakeBackend()
+        let controller = InferenceController(backend: fake, resourceProfile: .largeRAM)
+        try await controller.loadModel(id: "m", role: .orchestrator, quantization: .q4)
+        try await controller.loadDraftModel(id: "draft")
+
+        await controller.perform(.unloadUtilityModel)
+        #expect(await fake.unloadedDraftRoles.contains(.orchestrator))
+    }
+
+    @Test func unloadingOrchestratorAlsoUnloadsDraft() async throws {
+        let fake = FakeBackend()
+        let controller = InferenceController(backend: fake, resourceProfile: .largeRAM)
+        try await controller.loadModel(id: "m", role: .orchestrator, quantization: .q4)
+        try await controller.loadDraftModel(id: "draft")
+
+        await controller.unload(role: .orchestrator)
+        #expect(await fake.unloadedDraftRoles.contains(.orchestrator))
+        #expect(await fake.unloadedRoles.contains(.orchestrator))
+    }
+
     @Test func generationRequestCarriesProfileEngineTuning() async throws {
         let fake = FakeBackend()
         let controller = InferenceController(backend: fake, resourceProfile: .smallRAM)
