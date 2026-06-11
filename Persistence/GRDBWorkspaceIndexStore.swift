@@ -195,6 +195,17 @@ public final class GRDBWorkspaceIndexStore: WorkspaceIndexStore {
         }
     }
 
+    public func symbols(path: String) async throws -> [CodeSymbol] {
+        try await dbWriter.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT name, kind, line, column FROM file_symbol
+                WHERE path = ? ORDER BY line ASC
+                """, arguments: [path]).map { row in
+                    CodeSymbol(name: row["name"], kind: row["kind"], line: row["line"], column: row["column"])
+                }
+        }
+    }
+
     public func search(_ query: String, limit: Int) async throws -> [SearchHit] {
         // An empty/invalid query produces no pattern → no results (no error).
         guard let pattern = FTS5Pattern(matchingAllTokensIn: query)?.rawPattern else { return [] }

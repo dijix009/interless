@@ -799,6 +799,11 @@ public final class WorkspaceSessionModel {
             environment: environment)
         var observations = conversationContext.observations
         observations.append(contentsOf: await workspaceChatObservations(environment: environment, prompt: promptText))
+        // Re-inject the agent's own open plan each turn (Claude Code-style):
+        // without this, todos persist to storage but the model forgets them.
+        if let todoObservation = await openTodosObservation(sessionID: sessionID) {
+            observations.append(todoObservation)
+        }
         observations.append(responseReasoningEffort.promptInstruction(for: responseModelID))
         let contextEpoch = await contextEpochStore.replace(
             sessionID: sessionID ?? assistantID,
@@ -1433,6 +1438,10 @@ public final class WorkspaceSessionModel {
         case .contextBuilt:
             let id = appendTool("Context built")
             Task { await persistSessionMessagePart(sessionID: sessionID, messageID: id, role: .system, kind: "context", text: "Context built") }
+        case .contextCompacted(let degraded, let dropped):
+            let text = "Context compacted to fit the model window (\(degraded) tool output\(degraded == 1 ? "" : "s") trimmed, \(dropped) message\(dropped == 1 ? "" : "s") dropped)"
+            let id = appendTool(text)
+            Task { await persistSessionMessagePart(sessionID: sessionID, messageID: id, role: .system, kind: "context", text: text) }
         case .completed(let result):
             updateGenerationSpeed(for: assistantID, info: result.completionInfo)
             replaceMessage(id: assistantID, text: result.text, isStreaming: false)
@@ -1807,7 +1816,10 @@ public final class WorkspaceSessionModel {
         let messageCount = (transcriptCharacters > 0 ? messages.filter { !$0.isToolEvent }.count : 0)
             + (trimmedDraft.isEmpty ? 0 : 1)
         let messageOverhead = max(0, messageCount) * 8
-        return Int(ceil(Double(transcriptCharacters + draftCharacters) / 4.0)) + messageOverhead
+        // Conservative ~3.3 chars/token for code-heavy text. This meter is a UI
+        // estimate only; the enforced budget is the tokenizer-true fitting in the
+        // agent loop (AgentContextFitter).
+        return Int(ceil(Double(transcriptCharacters + draftCharacters) / 3.3)) + messageOverhead
     }
 
     private func estimatedConversationContextCharacters(for promptText: String) -> Int {
@@ -1945,16 +1957,51 @@ public final class WorkspaceSessionModel {
         return selected.reversed()
     }
 
+    /// Compact checklist of the agent's own open todos, token-capped.
+    private func openTodosObservation(sessionID: UUID?) async -> String? {
+        guard let sessionStore, let sessionID,
+              let todos = try? await sessionStore.todos(sessionID: sessionID) else { return nil }
+        let open = todos.filter { $0.status == .pending || $0.status == .inProgress }
+        guard !open.isEmpty else { return nil }
+        let lines = open.prefix(20).map { todo in
+            "- [\(todo.status == .inProgress ? "~" : " ")] \(todo.title)"
+        }
+        return "Current plan (your own open todos — continue them and keep them updated via the todo tool):\n"
+            + String(lines.joined(separator: "\n").prefix(1_200))
+    }
+
     private func compactConversationIfNeeded(
         sessionID: UUID?,
         isPlainChat: Bool,
         environment: WorkspaceEnvironment?
     ) async {
         guard let sessionStore, let sessionID else { return }
+        // Both modes compact now: simple mode consults the checkpoint too, so
+        // history older than the trimmed transcript isn't simply gone.
         let mode = modelContextSettings.conversationContextMode(isPlainChat: isPlainChat)
-        guard mode == .smart else { return }
         let builder = Self.conversationContextBuilder(sessionStore: sessionStore, environment: environment)
-        await builder.compactIfNeeded(sessionID: sessionID, mode: mode)
+        // Abstractive summarization through the local model; the builder degrades
+        // to its extractive slice when this returns nil/empty (e.g. no model).
+        let runSettings = settings
+        let hooks = toolRuntimeHooks(sessionID: sessionID)
+        let summarize: @Sendable (String) async -> String? = { joined in
+            guard let environment else { return nil }
+            let task = AgentTask(
+                prompt: "Summarize this conversation history into at most 10 terse bullet points. "
+                    + "Preserve decisions, file paths, identifiers, and open tasks. "
+                    + "Do not call tools; output only the bullets.\n\n" + joined,
+                kind: .summarize,
+                maxTokens: 400)
+            let stream = await environment.runAgent(task, runSettings, hooks)
+            var text: String?
+            do {
+                for try await event in stream {
+                    if case .completed(let result) = event { text = result.text }
+                }
+            } catch { return nil }
+            return text
+        }
+        await builder.compactIfNeeded(sessionID: sessionID, mode: mode, summarize: summarize)
     }
 
     private nonisolated static func conversationContextBuilder(

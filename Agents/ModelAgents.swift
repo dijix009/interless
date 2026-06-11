@@ -132,13 +132,16 @@ private struct ModelAgentRunner: Sendable {
                     var toolResults: [ToolResult] = []
                     var completionInfo: TokenChunk.CompletionInfo?
                     var messages = messages(for: task)
-                    var allowToolAdvertisement = !toolRegistry.definitions.isEmpty
+                    var allowToolAdvertisement = !toolRegistry.definitions.isEmpty && loopPolicy.maxToolIterations > 0
                     var retriedWithoutToolsAfterSchemaLeak = false
 
                     for iteration in 1...(loopPolicy.maxToolIterations + 1) {
                         try Task.checkCancellation()
                         continuation.yield(.toolIterationStarted(iteration))
                         let advertisedTools = allowToolAdvertisement ? toolRegistry.definitions : []
+                        // Capture the schema generation actually shown to the model so
+                        // a mid-session registry/policy swap rejects in-flight calls.
+                        let advertisedGeneration = toolRegistry.generation
                         let maxTokens = minOptional(
                             task.maxTokens,
                             resourceBudget.maxTokens(
@@ -147,6 +150,20 @@ private struct ModelAgentRunner: Sendable {
                         let contextTokenBudget = minOptional(
                             task.contextTokenBudget,
                             resourceBudget.contextTokenBudget(for: route.modelRole))
+                        // Tokenizer-true pre-send fitting: with the quantized KV
+                        // strategy there is no rotating-window fallback, so this is
+                        // the context-overflow protection (pins system + latest
+                        // user; degrades old tool outputs; drops oldest last).
+                        let fit = await AgentContextFitter.fit(
+                            messages,
+                            tokenBudget: contextTokenBudget,
+                            maxTokens: maxTokens,
+                            toolCount: advertisedTools.count,
+                            count: { await model.countTokens($0, role: route.modelRole) })
+                        messages = fit.messages
+                        if fit.degraded > 0 || fit.dropped > 0 {
+                            continuation.yield(.contextCompacted(degraded: fit.degraded, dropped: fit.dropped))
+                        }
                         let request = GenerationRequest(
                             role: route.modelRole,
                             input: .messages(messages),
@@ -214,7 +231,7 @@ private struct ModelAgentRunner: Sendable {
                         for call in toolCalls {
                             let toolRequest: ToolRequest
                             do {
-                                toolRequest = try toolRegistry.request(from: call)
+                                toolRequest = try toolRegistry.request(from: call, generation: advertisedGeneration)
                             } catch {
                                 continuation.yield(.toolCallRejected(call, String(describing: error)))
                                 throw error
@@ -297,6 +314,10 @@ private func looksLikeToolSchemaLeak(_ text: String) -> Bool {
           trimmed.contains("\"description\"") else {
         return false
     }
+    // Only treat predominantly-JSON output as a leak: legitimate prose that
+    // discusses schemas (e.g. answers about tool design) must never be dropped.
+    let jsonDominant = trimmed.hasPrefix("{") || trimmed.hasPrefix("[") || trimmed.hasPrefix("```json")
+    guard jsonDominant else { return false }
     let proseMarkers = [". ", "? ", "! ", "\n\nThe ", "\n\nThis ", "\n\nIt "]
     let hasLikelyProse = proseMarkers.contains { trimmed.contains($0) }
     let schemaMarkers = [
@@ -320,5 +341,75 @@ private func minOptional(_ lhs: Int?, _ rhs: Int?) -> Int? {
     case let (.some(a), .none): return a
     case let (.none, .some(b)): return b
     case (.none, .none): return nil
+    }
+}
+
+/// Deterministic pre-send context fitting (internal for unit tests).
+///
+/// 1. Reserve room for the answer (`maxTokens`) + advertised tool schemas.
+/// 2. Pin system messages and the latest user message (never touched).
+/// 3. Degrade oldest **tool** messages to a 240-char preview.
+/// 4. Only then drop oldest non-pinned messages entirely.
+/// `count` is the tokenizer-true counter (deterministic estimate in tests).
+enum AgentContextFitter {
+    struct Fit: Sendable {
+        var messages: [GenerationRequest.ChatMessage]
+        var degraded: Int
+        var dropped: Int
+    }
+
+    static func fit(
+        _ messages: [GenerationRequest.ChatMessage],
+        tokenBudget: Int?,
+        maxTokens: Int?,
+        toolCount: Int,
+        count: (String) async -> Int
+    ) async -> Fit {
+        guard let tokenBudget, tokenBudget > 0 else {
+            return Fit(messages: messages, degraded: 0, dropped: 0)
+        }
+        let reserve = (maxTokens ?? 512) + (toolCount * 200) + 64
+        let available = max(512, tokenBudget - reserve)
+        let perMessageOverhead = 8
+
+        var costs: [Int] = []
+        var total = 0
+        for message in messages {
+            let cost = await count(message.content) + perMessageOverhead
+            costs.append(cost)
+            total += cost
+        }
+        guard total > available else {
+            return Fit(messages: messages, degraded: 0, dropped: 0)
+        }
+
+        let lastUserIndex = messages.lastIndex { $0.role == .user }
+        func isPinned(_ index: Int) -> Bool {
+            messages[index].role == .system || index == lastUserIndex
+        }
+
+        var fitted = messages
+        var degraded = 0
+        // Pass 1: degrade oldest tool outputs to previews.
+        for index in fitted.indices where total > available {
+            guard !isPinned(index), fitted[index].role == .tool, fitted[index].content.count > 280 else { continue }
+            let preview = String(fitted[index].content.prefix(240))
+                + "\n… [tool output truncated to fit context; re-run the tool if details are needed]"
+            fitted[index].content = preview
+            let newCost = await count(preview) + perMessageOverhead
+            total -= costs[index] - newCost
+            costs[index] = newCost
+            degraded += 1
+        }
+        // Pass 2: drop oldest non-pinned messages.
+        var keep = [Bool](repeating: true, count: fitted.count)
+        for index in fitted.indices where total > available {
+            guard !isPinned(index) else { continue }
+            keep[index] = false
+            total -= costs[index]
+        }
+        let dropped = keep.filter { !$0 }.count
+        let result = fitted.indices.compactMap { keep[$0] ? fitted[$0] : nil }
+        return Fit(messages: result, degraded: degraded, dropped: dropped)
     }
 }

@@ -258,7 +258,8 @@ public actor WorkspaceIndexer {
         let budget = resourceBudget
         let metrics = self.metrics
         let root = self.root
-        return await withTaskGroup(of: SearchHit.self) { group in
+        let store = self.store
+        let enriched = await withTaskGroup(of: SearchHit.self) { group in
             for hit in hits {
                 group.addTask {
                     var hit = hit
@@ -269,6 +270,15 @@ public actor WorkspaceIndexer {
                         maxReadBytes: budget.maxSearchSnippetReadBytes
                     ) {
                         hit.snippet = result.snippet
+                        // Repo-map-style label: prefix the snippet with the symbol
+                        // enclosing the matched line so the model knows where in
+                        // the file the hit lives, not just the line text.
+                        if let snippet = result.snippet,
+                           let line = result.line,
+                           let symbols = try? await store.symbols(path: hit.relativePath),
+                           let enclosing = symbols.last(where: { $0.line <= line }) {
+                            hit.snippet = "\(enclosing.kind) \(enclosing.name) › \(snippet)"
+                        }
                         await metrics?.record(.init(
                             kind: .searchSnippetBytesRead,
                             unit: .bytes,
@@ -278,13 +288,38 @@ public actor WorkspaceIndexer {
                     return hit
                 }
             }
-            var enriched: [SearchHit] = []
+            var collected: [SearchHit] = []
             for await hit in group {
-                enriched.append(hit)
+                collected.append(hit)
             }
             let order = Dictionary(uniqueKeysWithValues: hits.enumerated().map { ($0.element.relativePath, $0.offset) })
-            return enriched.sorted { (order[$0.relativePath] ?? 0) < (order[$1.relativePath] ?? 0) }
+            return collected.sorted { (order[$0.relativePath] ?? 0) < (order[$1.relativePath] ?? 0) }
         }
+        return await Self.rerank(enriched, store: store)
+    }
+
+    /// Diversity + recency re-rank (lower score = better, FTS convention):
+    /// repeated hits from the same directory are pushed down (MMR-style, so one
+    /// hot folder can't crowd out the result set) and recently edited files get
+    /// a small boost (active code is more likely what the user means).
+    private static func rerank(_ hits: [SearchHit], store: any WorkspaceIndexStore) async -> [SearchHit] {
+        guard hits.count > 1 else { return hits }
+        let now = Int(Date().timeIntervalSince1970)
+        var directoryCounts: [String: Int] = [:]
+        var adjusted: [(hit: SearchHit, score: Double)] = []
+        for hit in hits {
+            var score = hit.score
+            let directory = (hit.relativePath as NSString).deletingLastPathComponent
+            let priorFromDirectory = directoryCounts[directory, default: 0]
+            score += Double(priorFromDirectory) * 0.5
+            directoryCounts[directory] = priorFromDirectory + 1
+            if let state = try? await store.fileState(path: hit.relativePath),
+               now - state.modifiedAtEpoch < 7 * 24 * 3600 {
+                score -= 0.25
+            }
+            adjusted.append((hit, score))
+        }
+        return adjusted.sorted { $0.score < $1.score }.map(\.hit)
     }
 
     public func gitStatus() async -> GitStatus {

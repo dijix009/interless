@@ -63,6 +63,10 @@ public protocol InferenceBackend: Sendable {
     /// Unload `role`'s draft model (no-op when none is loaded).
     func unloadDraftModel(forRole role: ModelRole) async
 
+    /// Tokenizer-true token count for `text` using `role`'s loaded model;
+    /// falls back to a deterministic estimate when the model isn't loaded.
+    func countTokens(_ text: String, role: ModelRole) async -> Int
+
     /// Current MLX GPU allocator counters (active / cache / peak bytes).
     func gpuMemory() async -> GPUMemory
 
@@ -85,4 +89,17 @@ public extension InferenceBackend {
     }
 
     func unloadDraftModel(forRole role: ModelRole) async {}
+
+    /// Deterministic estimate (~4 bytes/token) for backends without a tokenizer.
+    func countTokens(_ text: String, role: ModelRole) async -> Int {
+        InferenceTokenEstimate.estimate(text)
+    }
+}
+
+/// Shared fallback estimate so the backend default, MLX fallback, and agent-layer
+/// default all agree.
+public enum InferenceTokenEstimate {
+    public static func estimate(_ text: String) -> Int {
+        max(1, Int((Double(text.utf8.count) / 4.0).rounded(.up)))
+    }
 }

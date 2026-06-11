@@ -177,6 +177,8 @@ public enum AgentCLI {
                 lines.append("tool-finish \(result.request.displayName) exit=\(result.exitCode.map(String.init) ?? "n/a")")
             case .contextBuilt:
                 lines.append("context")
+            case .contextCompacted(let degraded, let dropped):
+                lines.append("context-compacted degraded=\(degraded) dropped=\(dropped)")
             case .token(let chunk):
                 if !chunk.text.isEmpty { lines.append("token \(chunk.text)") }
             case .completed(let result):

@@ -27,37 +27,40 @@ public enum SnippetExtractor {
         query: String,
         maxReadBytes: Int,
         maxChars: Int = 160
-    ) throws -> (snippet: String?, bytesRead: Int) {
+    ) throws -> (snippet: String?, line: Int?, bytesRead: Int) {
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         let cap = max(0, maxReadBytes)
         let data = try handle.read(upToCount: cap) ?? Data()
         guard !data.prefix(min(data.count, 8192)).contains(0) else {
-            return (nil, data.count)
+            return (nil, nil, data.count)
         }
         let terms = Self.terms(in: query)
-        guard !terms.isEmpty else { return (nil, data.count) }
+        guard !terms.isEmpty else { return (nil, nil, data.count) }
 
         // Scan the bytes line-by-line, decoding one line at a time and stopping at
         // the first match — avoids decoding the whole buffer into a String and
-        // materializing an array of every line just to find one line.
+        // materializing an array of every line just to find one line. The 1-based
+        // line number lets callers attach the enclosing symbol from the index.
         let newline = UInt8(ascii: "\n")
+        var lineNumber = 1
         var lineStart = data.startIndex
         var index = data.startIndex
         let end = data.endIndex
         while index < end {
             if data[index] == newline {
                 if let hit = Self.match(data[lineStart..<index], terms: terms, maxChars: maxChars) {
-                    return (hit, data.count)
+                    return (hit, lineNumber, data.count)
                 }
+                lineNumber += 1
                 lineStart = data.index(after: index)
             }
             index = data.index(after: index)
         }
         if lineStart < end, let hit = Self.match(data[lineStart..<end], terms: terms, maxChars: maxChars) {
-            return (hit, data.count)
+            return (hit, lineNumber, data.count)
         }
-        return (nil, data.count)
+        return (nil, nil, data.count)
     }
 
     /// Returns the trimmed/truncated line if it contains any term, else nil.

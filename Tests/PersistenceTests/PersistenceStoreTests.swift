@@ -234,6 +234,19 @@ struct PersistenceStoreTests {
         #expect(hits[0].score < hits[1].score)
     }
 
+    @Test func symbolsByPathReturnsOrderedSymbols() async throws {
+        let store = try makeStore()
+        try await store.upsert(IndexedFile(
+            relativePath: "S.swift", sizeBytes: 1, modifiedAtEpoch: 1, contentHash: "s", content: "x",
+            symbols: [
+                CodeSymbol(name: "later", kind: "function", line: 9, column: 1),
+                CodeSymbol(name: "Earlier", kind: "type", line: 2, column: 1),
+            ]))
+        let symbols = try await store.symbols(path: "S.swift")
+        #expect(symbols.map(\.name) == ["Earlier", "later"])
+        #expect(try await store.symbols(path: "missing.swift").isEmpty)
+    }
+
     @Test func pruneUnseenRemovesUnstampedRowsAcrossAllTables() async throws {
         let queue = try DatabaseQueue()
         try WorkspaceSchema.makeMigrator().migrate(queue)

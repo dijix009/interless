@@ -61,7 +61,7 @@ public struct ConversationContextBuilder: Sendable {
             let parts = try await loadMessageParts(sessionID, 500)
             switch request.mode {
             case .simple:
-                return simpleBundle(request: request, parts: parts, effectiveMode: .simple)
+                return await simpleBundle(request: request, parts: parts, effectiveMode: .simple)
             case .smart:
                 return try await smartBundle(request: request, parts: parts)
             }
@@ -89,7 +89,12 @@ public struct ConversationContextBuilder: Sendable {
         }
     }
 
-    public func compactIfNeeded(sessionID: UUID, mode: ConversationContextMode, now: Date = Date()) async {
+    public func compactIfNeeded(
+        sessionID: UUID,
+        mode: ConversationContextMode,
+        now: Date = Date(),
+        summarize: (@Sendable (String) async -> String?)? = nil
+    ) async {
         do {
             let parts = try await loadMessageParts(sessionID, 500)
             let candidates = eligibleCandidates(from: parts, prompt: "")
@@ -103,7 +108,17 @@ public struct ConversationContextBuilder: Sendable {
             }
             let compacted = Array(candidates.dropLast(min(12, candidates.count)))
             guard !compacted.isEmpty else { return }
-            let summary = Self.extractiveSummary(from: compacted.map(\.row), maxCharacters: 2_400)
+            // Prefer a model-written abstractive summary (preserves decisions,
+            // paths, open tasks); degrade to the extractive prefix slice when no
+            // summarizer is available or it returns nothing.
+            let summary: String
+            if let summarize,
+               let abstractive = await summarize(compacted.map(\.row).joined(separator: "\n\n")),
+               !abstractive.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                summary = String(abstractive.prefix(2_400))
+            } else {
+                summary = Self.extractiveSummary(from: compacted.map(\.row), maxCharacters: 2_400)
+            }
             let recent = candidates.suffix(8).map(\.row).joined(separator: "\n\n")
             try await saveCompaction(SessionCompactionCheckpoint(
                 sessionID: sessionID,
@@ -147,7 +162,7 @@ public struct ConversationContextBuilder: Sendable {
         request: ConversationContextRequest,
         parts: [SessionMessagePart],
         effectiveMode: EffectiveConversationContextMode
-    ) -> ConversationContextBundle {
+    ) async -> ConversationContextBundle {
         var observations = [modeObservation(effectiveMode)]
         guard Self.isLikelyContextDependent(request.prompt) else {
             return ConversationContextBundle(
@@ -160,6 +175,17 @@ public struct ConversationContextBuilder: Sendable {
         let rows = boundedRecentRows(
             candidates: eligibleCandidates(from: parts, prompt: request.prompt),
             tokenLimit: tokenLimit)
+        // Simple mode also consults the compaction checkpoint, so history older
+        // than the trimmed transcript isn't simply gone.
+        var summaryID: UUID?
+        if let sessionID = request.sessionID,
+           let checkpoint = try? await loadLatestCompaction(sessionID),
+           !checkpoint.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            observations.append(
+                "Conversation memory summary (background only; use only if relevant):\n"
+                    + String(checkpoint.summary.prefix(1_600)))
+            summaryID = checkpoint.id
+        }
         if !rows.isEmpty {
             observations.append(priorConversationObservation(rows: rows))
         }
@@ -168,6 +194,7 @@ public struct ConversationContextBuilder: Sendable {
             effectiveMode: effectiveMode,
             observations: observations,
             includedMessagePartIDs: rows.map(\.part.id),
+            summaryID: summaryID,
             estimatedTokens: estimateTokens(rows.map(\.row).joined(separator: "\n\n")),
             diagnostics: ["reason": rows.isEmpty ? "no-relevant-history" : "deterministic-follow-up"])
     }
@@ -178,7 +205,7 @@ public struct ConversationContextBuilder: Sendable {
     ) async throws -> ConversationContextBundle {
         guard let queryVector = try await embedTexts(["conversation_query: \(request.prompt)"])?.first,
               !queryVector.isEmpty else {
-            return simpleBundle(request: request, parts: parts, effectiveMode: .smartDegraded)
+            return await simpleBundle(request: request, parts: parts, effectiveMode: .smartDegraded)
         }
         let candidates = eligibleCandidates(from: parts, prompt: request.prompt)
         try await ensureEmbeddings(for: candidates)
