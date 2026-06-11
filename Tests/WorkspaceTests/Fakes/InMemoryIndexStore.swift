@@ -83,6 +83,10 @@ actor InMemoryIndexStore: WorkspaceIndexStore {
             .map { SearchHit(relativePath: $0.relativePath, score: 0, snippet: nil) }
     }
 
+    func symbols(path: String) async throws -> [CodeSymbol] {
+        (docs[path]?.symbols ?? []).sorted { $0.line < $1.line }
+    }
+
     func metadata(key: String) async throws -> String? { meta[key] }
 
     func setMetadata(key: String, value: String?) async throws { meta[key] = value }

@@ -29,6 +29,10 @@ public protocol WorkspaceIndexStore: Sendable {
     /// Per-file state lookup for path-scoped incremental indexing.
     func fileState(path: String) async throws -> FileIndexState?
 
+    /// Extracted symbols for one indexed file, ordered by line. Lets search
+    /// results carry their enclosing symbol (repo-map-style labels).
+    func symbols(path: String) async throws -> [CodeSymbol]
+
     /// Ranked matches (path + bm25 score). Snippets are filled by the caller from
     /// disk, since the index stores no content.
     func search(_ query: String, limit: Int) async throws -> [SearchHit]
@@ -72,6 +76,8 @@ public extension WorkspaceIndexStore {
     }
 
     func upsertEmbedding(path: String, vector: EmbeddingVector) async throws {}
+
+    func symbols(path: String) async throws -> [CodeSymbol] { [] }
 
     func semanticSearch(vector: EmbeddingVector, limit: Int) async throws -> [SearchHit] {
         []
