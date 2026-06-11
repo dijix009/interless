@@ -1,5 +1,5 @@
-import Combine
 import Foundation
+import Observation
 import Agents
 import Core
 import InterlessSecurity
@@ -15,51 +15,52 @@ private struct MessageGenerationStats {
 }
 
 @MainActor
-public final class WorkspaceSessionModel: ObservableObject {
-    @Published public private(set) var workspaceURL: URL?
-    @Published public private(set) var indexingProgress: IndexingProgress?
-    @Published public private(set) var fileTree: [FileTreeNode] = []
-    @Published public private(set) var selectedFilePath: String?
-    @Published public private(set) var selectedFileText = ""
-    @Published public private(set) var selectedFilePreview: FilePreviewViewState = .empty
-    @Published public var fileTreeFilter = ""
-    @Published public private(set) var expandedFileTreePaths: Set<String>
-    @Published public var searchQuery = ""
-    @Published public private(set) var searchHits: [SearchHit] = []
-    @Published public private(set) var gitStatus: GitStatus = .notARepository
-    @Published public private(set) var diffLines: [DiffLine] = []
-    @Published public private(set) var diffFiles: [DiffFile] = []
-    @Published public private(set) var chatMessages: [ChatMessageViewState] = []
-    @Published public private(set) var chatThreads: [ChatThreadViewState] = []
-    @Published public private(set) var globalChatThreads: [ChatThreadViewState] = []
-    @Published public private(set) var modelStatus: ModelLoadStatus = .idle
-    @Published public private(set) var modelDownloadProgress: ModelDownloadProgressViewState?
-    @Published public private(set) var availableChatModelIDs: [String]
-    @Published public private(set) var notices: [AppNotice] = []
-    @Published public private(set) var activities: [WorkspaceActivity] = []
-    @Published public private(set) var focusTarget: WorkspaceFocusTarget = .none
-    @Published public private(set) var patchProposal: PatchProposal?
-    @Published public var isPatchReviewPresented = false
-    @Published public private(set) var modelOnboarding: ModelOnboardingViewState
-    @Published public var layout: WorkspaceLayoutPreferences {
+@Observable
+public final class WorkspaceSessionModel {
+    public private(set) var workspaceURL: URL?
+    public private(set) var indexingProgress: IndexingProgress?
+    public private(set) var fileTree: [FileTreeNode] = []
+    public private(set) var selectedFilePath: String?
+    public private(set) var selectedFileText = ""
+    public private(set) var selectedFilePreview: FilePreviewViewState = .empty
+    public var fileTreeFilter = ""
+    public private(set) var expandedFileTreePaths: Set<String>
+    public var searchQuery = ""
+    public private(set) var searchHits: [SearchHit] = []
+    public private(set) var gitStatus: GitStatus = .notARepository
+    public private(set) var diffLines: [DiffLine] = []
+    public private(set) var diffFiles: [DiffFile] = []
+    public private(set) var chatMessages: [ChatMessageViewState] = []
+    public private(set) var chatThreads: [ChatThreadViewState] = []
+    public private(set) var globalChatThreads: [ChatThreadViewState] = []
+    public private(set) var modelStatus: ModelLoadStatus = .idle
+    public private(set) var modelDownloadProgress: ModelDownloadProgressViewState?
+    public private(set) var availableChatModelIDs: [String]
+    public private(set) var notices: [AppNotice] = []
+    public private(set) var activities: [WorkspaceActivity] = []
+    public private(set) var focusTarget: WorkspaceFocusTarget = .none
+    public private(set) var patchProposal: PatchProposal?
+    public var isPatchReviewPresented = false
+    public private(set) var modelOnboarding: ModelOnboardingViewState
+    public var layout: WorkspaceLayoutPreferences {
         didSet { preferences.layoutPreferences = layout }
     }
-    @Published public var chatDraft = ""
-    @Published public var isSettingsPresented = false
-    @Published public var isHealthPresented = false
-    @Published public private(set) var healthState = HealthStatusViewState()
-    @Published public private(set) var lastDiagnosticsExport: DiagnosticsExportViewState?
-    @Published public private(set) var configStatus = ConfigStatusViewState()
-    @Published public private(set) var permissionPrompt: PermissionPromptViewState?
-    @Published public private(set) var questionPrompt: QuestionPromptViewState?
-    @Published public private(set) var todoPanel = TodoPanelViewState()
-    @Published public private(set) var backgroundToolJobs: [BackgroundToolJobViewState] = []
-    @Published public private(set) var sessionTimelineItems: [SessionTimelineItemViewState] = []
-    @Published public private(set) var selectedReasoningEffort: ReasoningEffort = .none
-    @Published public private(set) var modelContextSettings: ModelContextSettingsViewState {
+    public var chatDraft = ""
+    public var isSettingsPresented = false
+    public var isHealthPresented = false
+    public private(set) var healthState = HealthStatusViewState()
+    public private(set) var lastDiagnosticsExport: DiagnosticsExportViewState?
+    public private(set) var configStatus = ConfigStatusViewState()
+    public private(set) var permissionPrompt: PermissionPromptViewState?
+    public private(set) var questionPrompt: QuestionPromptViewState?
+    public private(set) var todoPanel = TodoPanelViewState()
+    public private(set) var backgroundToolJobs: [BackgroundToolJobViewState] = []
+    public private(set) var sessionTimelineItems: [SessionTimelineItemViewState] = []
+    public private(set) var selectedReasoningEffort: ReasoningEffort = .none
+    public private(set) var modelContextSettings: ModelContextSettingsViewState {
         didSet { preferences.modelContextSettings = modelContextSettings.normalized() }
     }
-    @Published public var settings: ModelSettingsViewState {
+    public var settings: ModelSettingsViewState {
         didSet {
             preferences.modelSettings = settings
             clampReasoningEffortForCurrentModel()
@@ -85,26 +86,33 @@ public final class WorkspaceSessionModel: ObservableObject {
     private var currentConversationMode: ConversationMode?
     private var currentConversationWorkspacePath: String?
     private var visibleConversationMode: ConversationMode = .code
-    private var reindexTask: Task<Void, Never>?
-    private var watchTask: Task<Void, Never>?
-    private var configWatchTask: Task<Void, Never>?
-    private var chatTask: Task<Void, Never>?
-    private var modelLoadTask: Task<Void, Error>?
-    private var activeModelLoadID: UUID?
-    private var cancelledModelLoadIDs: Set<UUID> = []
-    private var generationStats: [UUID: MessageGenerationStats] = [:]
+    @ObservationIgnored private var reindexTask: Task<Void, Never>?
+    @ObservationIgnored private var watchTask: Task<Void, Never>?
+    @ObservationIgnored private var configWatchTask: Task<Void, Never>?
+    @ObservationIgnored private var chatTask: Task<Void, Never>?
+    @ObservationIgnored private var modelLoadTask: Task<Void, Error>?
+    @ObservationIgnored private var activeModelLoadID: UUID?
+    @ObservationIgnored private var cancelledModelLoadIDs: Set<UUID> = []
+    @ObservationIgnored private var generationStats: [UUID: MessageGenerationStats] = [:]
     /// Per-assistant buffered streamed text, applied to the transcript in coalesced
     /// flushes (~every `tokenFlushThresholdCharacters`) instead of once per token,
     /// to cut MainActor publishes / viewState rebuilds during streaming.
-    private var pendingStreamedText: [UUID: String] = [:]
+    @ObservationIgnored private var pendingStreamedText: [UUID: String] = [:]
     /// Memoized context-usage meter. Stable during token streaming (the streaming
     /// message is excluded from the estimate), so this avoids the O(transcript)
     /// scan on every streamed chunk; recomputed only when the signature changes.
-    private var contextUsageCache: (signature: Int, value: (label: String, fraction: Double))?
+    @ObservationIgnored private var contextUsageCache: (signature: Int, value: (label: String, fraction: Double))?
+    /// Memoized file-tree derivations: `viewState` previously re-walked the whole
+    /// tree twice (filter + visible rows, up to ~20k nodes) on every rebuild —
+    /// i.e. on every coalesced token flush. Invalidated by tree version/filter/
+    /// expansion changes only.
+    @ObservationIgnored private var fileTreeVersion = 0
+    @ObservationIgnored private var treeDerivationCache:
+        (version: Int, filter: String, expanded: Set<String>, filtered: [FileTreeNode], rows: [FileTreeVisibleRow])?
     private static let tokenFlushThresholdCharacters = 32
-    private var permissionContinuations: [UUID: CheckedContinuation<ToolPermissionResolution, Never>] = [:]
-    private var questionContinuations: [UUID: CheckedContinuation<ToolQuestionResponse, Error>] = [:]
-    private var didAttemptRestore = false
+    @ObservationIgnored private var permissionContinuations: [UUID: CheckedContinuation<ToolPermissionResolution, Never>] = [:]
+    @ObservationIgnored private var questionContinuations: [UUID: CheckedContinuation<ToolQuestionResponse, Error>] = [:]
+    @ObservationIgnored private var didAttemptRestore = false
 
     public init(
         preferences: AppPreferences = AppPreferences(),
@@ -160,7 +168,7 @@ public final class WorkspaceSessionModel: ObservableObject {
             chrome: workspaceChrome,
             workspacePath: workspaceURL?.path,
             indexingSummary: indexingSummary,
-            fileTree: FileTreeNode.filtered(nodes: fileTree, query: fileTreeFilter),
+            fileTree: fileTreeDerivations().filtered,
             fileTreeFilter: fileTreeFilter,
             selectedFilePath: selectedFilePath,
             selectedFileText: selectedFileText,
@@ -181,10 +189,7 @@ public final class WorkspaceSessionModel: ObservableObject {
             layout: layout,
             patchProposal: patchProposal,
             isPatchReviewPresented: isPatchReviewPresented,
-            fileTreeRows: FileTreeModel.visibleRows(
-                nodes: fileTree,
-                expandedPaths: expandedFileTreePaths,
-                filter: fileTreeFilter),
+            fileTreeRows: fileTreeDerivations().rows,
             expandedFileTreePaths: expandedFileTreePaths,
             modelOnboarding: modelOnboarding,
             availableChatModelIDs: availableChatModelIDs,
@@ -1353,6 +1358,7 @@ public final class WorkspaceSessionModel: ObservableObject {
         guard let environment else { return }
         do {
             fileTree = try await environment.fileTree()
+            fileTreeVersion += 1
         } catch {
             appendNotice(severity: .error, title: "File tree failed", message: String(describing: error))
         }
@@ -1753,6 +1759,24 @@ public final class WorkspaceSessionModel: ObservableObject {
         let value = (Self.formatContextUsageLabel(fraction), fraction)
         contextUsageCache = (signature, value)
         return value
+    }
+
+    /// Returns the filtered tree + visible rows, recomputing only when the tree
+    /// version, filter, or expansion set changed — never on token flushes.
+    private func fileTreeDerivations() -> (filtered: [FileTreeNode], rows: [FileTreeVisibleRow]) {
+        if let cache = treeDerivationCache,
+           cache.version == fileTreeVersion,
+           cache.filter == fileTreeFilter,
+           cache.expanded == expandedFileTreePaths {
+            return (cache.filtered, cache.rows)
+        }
+        let filtered = FileTreeNode.filtered(nodes: fileTree, query: fileTreeFilter)
+        let rows = FileTreeModel.visibleRows(
+            nodes: fileTree,
+            expandedPaths: expandedFileTreePaths,
+            filter: fileTreeFilter)
+        treeDerivationCache = (fileTreeVersion, fileTreeFilter, expandedFileTreePaths, filtered, rows)
+        return (filtered, rows)
     }
 
     /// Cheap signature for the context-usage memo. O(messageCount) — `utf8.count`
