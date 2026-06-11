@@ -159,6 +159,24 @@ struct ToolingTests {
         #expect(try String(contentsOf: temp.url.appendingPathComponent("file.txt"), encoding: .utf8) == "hello\npatched\n")
     }
 
+    @Test func applyPatchCreatesNewFileFromPureAdditionHunks() async throws {
+        let temp = try TempWorkspace()
+        let loop = try ToolExecutionLoop(
+            root: temp.url,
+            policy: ToolExecutionPolicy(allowsWrites: true))
+        let result = try await loop.execute(.applyPatch(patch: """
+        diff --git a/new/Created.txt b/new/Created.txt
+        --- /dev/null
+        +++ b/new/Created.txt
+        @@ -0,0 +1,2 @@
+        +first line
+        +second line
+        """))
+        #expect(result.didWrite)
+        #expect(result.stdout.contains("verified Created.txt"))
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("new/Created.txt"), encoding: .utf8) == "first line\nsecond line\n")
+    }
+
     @Test func managedOutputStoreRetainsBoundedOutputRefs() async throws {
         let temp = try TempWorkspace()
         try temp.write("0123456789", to: "large.txt")

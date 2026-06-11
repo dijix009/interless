@@ -145,7 +145,16 @@ public actor ToolExecutionLoop {
             return resolved
         }
 
-        let parent = candidate.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
+        // Walk up to the nearest EXISTING ancestor so files can be created in
+        // not-yet-existing subdirectories (e.g. a patch adding new/Module/File).
+        // Containment is checked on the resolved ancestor; the missing segments
+        // below it cannot contain symlinks, and standardizedFileURL has already
+        // normalized any ".." components.
+        var parent = candidate.deletingLastPathComponent().standardizedFileURL
+        while !FileManager.default.fileExists(atPath: parent.path), parent.path != "/" {
+            parent = parent.deletingLastPathComponent()
+        }
+        parent = parent.resolvingSymlinksInPath()
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw ToolError.pathNotFound(parent.path)
@@ -205,7 +214,8 @@ public actor ToolExecutionLoop {
         }
         let snapshotID = try await recordMutation(paths: [relativePath(for: url)], reason: "edit_file")
         try updated.write(to: url, atomically: true, encoding: .utf8)
-        return ToolResult(request: request, stdout: path, didWrite: true, snapshotID: snapshotID)
+        let verification = Self.verifiedSummary(url: url).map { "\n" + $0 } ?? ""
+        return ToolResult(request: request, stdout: path + verification, didWrite: true, snapshotID: snapshotID)
     }
 
     private func replaceFirst(_ target: String, with replacement: String, in text: String) -> String {
@@ -222,21 +232,48 @@ public actor ToolExecutionLoop {
         let files = try parseUnifiedPatch(patch)
         guard !files.isEmpty else { throw ToolError.patchRejected("patch does not contain file hunks") }
         let paths = files.map(\.path)
-        let urls = try files.map { try resolve(path: $0.path, mustExist: true) }
+        // New files (`--- /dev/null` + all-addition hunks) are allowed: resolve
+        // without requiring existence and apply against empty contents.
+        let urls = try files.map { try resolve(path: $0.path, mustExist: false) }
         let snapshotID = try await recordMutation(paths: paths, reason: "apply_patch")
         for (filePatch, url) in zip(files, urls) {
-            let contents = try String(contentsOf: url, encoding: .utf8)
-            let updated = try apply(filePatch, to: contents)
+            let exists = FileManager.default.fileExists(atPath: url.path)
+            if !exists {
+                guard filePatch.hunks.allSatisfy({ hunk in hunk.lines.allSatisfy { $0.marker == "+" } }) else {
+                    throw ToolError.patchRejected("\(filePatch.path) does not exist; only pure-addition hunks can create it")
+                }
+            }
+            let contents = exists ? try String(contentsOf: url, encoding: .utf8) : ""
+            let updated: String
+            if exists {
+                updated = try apply(filePatch, to: contents)
+            } else {
+                // Build the new file directly from the addition lines.
+                updated = filePatch.hunks.flatMap { $0.lines.map(\.text) }.joined(separator: "\n") + "\n"
+            }
             guard updated.utf8.count <= policy.maxWriteBytes else {
                 throw ToolError.writeTooLarge(bytes: updated.utf8.count, limit: policy.maxWriteBytes)
             }
+            if !exists {
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            }
             try updated.write(to: url, atomically: true, encoding: .utf8)
         }
+        let verification = urls.compactMap { Self.verifiedSummary(url: $0) }.joined(separator: "\n")
         return ToolResult(
             request: request,
-            stdout: paths.joined(separator: "\n"),
+            stdout: paths.joined(separator: "\n") + (verification.isEmpty ? "" : "\n" + verification),
             didWrite: true,
             snapshotID: snapshotID)
+    }
+
+    /// Post-write verification line fed back to the model: re-reads the file so
+    /// the loop confirms what is actually on disk (act → verify), cheaply.
+    private static func verifiedSummary(url: URL) -> String? {
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        let lineCount = contents.utf8.reduce(into: 0) { if $1 == 0x0A { $0 += 1 } }
+        return "verified \(url.lastPathComponent): \(lineCount) lines, \(contents.utf8.count) bytes on disk"
     }
 
     private func grep(pattern: String, path: String?, maxResults: Int?) throws -> String {
@@ -444,7 +481,8 @@ public actor ToolExecutionLoop {
             throw ToolError.patchRejected("missing old range in hunk header")
         }
         let number = oldPart.dropFirst().split(separator: ",").first.map(String.init) ?? "1"
-        guard let start = Int(number), start > 0 else {
+        // `-0,0` is the standard header for file-creation patches (no old lines).
+        guard let start = Int(number), start >= 0 else {
             throw ToolError.patchRejected("invalid old range in hunk header")
         }
         return start

@@ -132,7 +132,7 @@ private struct ModelAgentRunner: Sendable {
                     var toolResults: [ToolResult] = []
                     var completionInfo: TokenChunk.CompletionInfo?
                     var messages = messages(for: task)
-                    var allowToolAdvertisement = !toolRegistry.definitions.isEmpty
+                    var allowToolAdvertisement = !toolRegistry.definitions.isEmpty && loopPolicy.maxToolIterations > 0
                     var retriedWithoutToolsAfterSchemaLeak = false
 
                     for iteration in 1...(loopPolicy.maxToolIterations + 1) {
@@ -314,6 +314,10 @@ private func looksLikeToolSchemaLeak(_ text: String) -> Bool {
           trimmed.contains("\"description\"") else {
         return false
     }
+    // Only treat predominantly-JSON output as a leak: legitimate prose that
+    // discusses schemas (e.g. answers about tool design) must never be dropped.
+    let jsonDominant = trimmed.hasPrefix("{") || trimmed.hasPrefix("[") || trimmed.hasPrefix("```json")
+    guard jsonDominant else { return false }
     let proseMarkers = [". ", "? ", "! ", "\n\nThe ", "\n\nThis ", "\n\nIt "]
     let hasLikelyProse = proseMarkers.contains { trimmed.contains($0) }
     let schemaMarkers = [
