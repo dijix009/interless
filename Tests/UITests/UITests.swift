@@ -537,6 +537,32 @@ struct UITests {
         ])
     }
 
+    @Test func markdownParserDoesNotCloseOnInfoBearingInnerFence() {
+        // An inner ```swift (info-bearing) line is content, not a close — the
+        // block runs to the next BARE fence, so nested fences don't truncate.
+        let text = "```markdown\nintro\n```swift\nlet x = 1\n```\ndone"
+        let blocks = MarkdownMessageParser.parse(text)
+        let codeTexts = blocks.compactMap { block -> String? in
+            if case let .code(_, text, _) = block { return text }
+            return nil
+        }
+        #expect(codeTexts.count == 1)
+        #expect(codeTexts.first?.contains("```swift") == true)
+        #expect(codeTexts.first?.contains("let x = 1") == true)
+        #expect(blocks.contains { if case let .paragraph(p) = $0 { return p.contains("done") } else { return false } })
+    }
+
+    @Test func assistantMessageRendersMarkdownOnlyWhenFinalized() {
+        // Streaming assistant text renders plainly (no per-flush markdown re-parse);
+        // markdown is parsed once the message is finalized.
+        let streaming = ChatMessageViewState(role: .assistant, text: "# Title\n```swift\nlet x = 1", isStreaming: true)
+        let finalized = ChatMessageViewState(role: .assistant, text: "# Title\n```swift\nlet x = 1\n```", isStreaming: false)
+        let user = ChatMessageViewState(role: .user, text: "hi", isStreaming: false)
+        #expect(ChatPaneView.rendersMarkdown(for: streaming) == false)
+        #expect(ChatPaneView.rendersMarkdown(for: finalized) == true)
+        #expect(ChatPaneView.rendersMarkdown(for: user) == false)
+    }
+
     @Test func chatComposerModelSelectionLoadsOnlyWhenNeeded() {
         #expect(ChatComposerModel.shouldLoadSelectedModel(
             currentModelID: "mlx-community/Llama-3.2-1B-Instruct-4bit",
@@ -706,7 +732,7 @@ struct UITests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let uiFiles = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("UI"), includingPropertiesForKeys: nil)
-        let forbidden = ["MLXEngine", "Persistence", "Workspace", "Tooling", "Agents", "GRDB"]
+        let forbidden = ["MLXEngine", "Persistence", "Workspace", "Tooling", "Agents", "GRDB", "AppCore"]
 
         for file in uiFiles where file.pathExtension == "swift" {
             let contents = try String(contentsOf: file, encoding: .utf8)

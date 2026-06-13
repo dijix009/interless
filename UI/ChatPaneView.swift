@@ -137,6 +137,14 @@ public struct ChatPaneView: View {
         isWorking || (isModelLoaded && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
+    /// Markdown is parsed only for finalized assistant messages. The still-streaming
+    /// message renders as plain `Text` so the whole body isn't re-parsed (and
+    /// `AttributedString(markdown:)` re-run per block) on every coalesced flush —
+    /// which is O(n²) over a long answer. Mid-stream markdown is half-parsed anyway.
+    public static func rendersMarkdown(for message: ChatMessageViewState) -> Bool {
+        message.role == .assistant && !message.isStreaming
+    }
+
     private var scrollSignature: Int {
         // O(messageCount) — `utf8.count` is O(1) — instead of building/joining a
         // whole-transcript string on every render (i.e. on every streamed chunk).
@@ -367,7 +375,7 @@ public struct ChatPaneView: View {
                 if message.role == .assistant {
                     assistantHeader(message)
                 }
-                if message.role == .assistant {
+                if Self.rendersMarkdown(for: message) {
                     MarkdownMessageView(text)
                 } else {
                     Text(text)
