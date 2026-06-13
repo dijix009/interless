@@ -206,13 +206,26 @@ answer-token setting or choose Reasoning: None.
 - Single-agent mode for small-memory systems.
 - Separate model fields for orchestrator, utility, and embeddings.
 - q4, q6, and q8 quantization settings.
-- Resource profiles: Automatic, Small RAM, Balanced, Large RAM.
+- Resource profiles: Automatic, Small RAM, Balanced, Large RAM. Each profile sets a
+  quantized-KV-cache policy (4-bit on Small RAM, near-lossless 8-bit on Balanced/Large)
+  and a proactive unified-memory ceiling so allocations throttle before the OS swaps.
+- Optional speculative decoding (Large RAM only): a small draft model proposes tokens the
+  orchestrator verifies. Off by default; enable in Settings → Model & Context. The draft
+  must share the main model's tokenizer (mismatches are rejected at load with a fallback to
+  normal decoding).
+- Single-agent mode for small-memory systems.
+- Separate model fields for orchestrator, utility, and embeddings.
 - Separate max answer-token settings for Chat and Code.
 - Max context-window setting, still capped by the active resource profile.
+- Deterministic context fitting: before each turn the prompt is fitted to the model's real
+  (tokenizer-counted) window — the system prompt and latest request are pinned, older tool
+  outputs are degraded to previews, then oldest history is dropped, surfaced as a
+  "context compacted" card. This is the overflow protection (there is no silent KV-window
+  drop of the system prompt).
 - Reasoning picker with None, Low, Medium, High where the selected model supports
   reasoning.
-- Context usage meter in the composer. The value is an estimate from current
-  prompt/session/workspace context, not a tokenizer-exact MLX count.
+- Context usage meter in the composer. The value is a fast estimate (~3.3 chars/token);
+  the enforced budget is the tokenizer-exact fitting above.
 
 ### Workspace
 
@@ -222,6 +235,11 @@ answer-token setting or choose Reasoning: None.
 - SQLite-backed workspace index with FTS5.
 - Lexical, structured, and semantic/hybrid search foundations.
 - Swift symbol/comment/import/reference extraction through tree-sitter.
+- Incremental indexing with batched transactions and SQL-side deletion pruning
+  (a `seenAt` scan epoch), so a full reindex stays bounded in memory and write cost.
+- Semantic search streams the embedding table with a bounded top-k (no whole-table load).
+- Search results carry their enclosing symbol (repo-map-style snippet labels) and are
+  re-ranked for directory diversity and edit recency.
 - Safe file previews with binary, symlink, size, and workspace-boundary checks.
 - `AGENTS.md` and configured instruction discovery for prompt context.
 - Prompt reference expansion for local files/directories and bounded attachments.

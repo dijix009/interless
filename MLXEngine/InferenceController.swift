@@ -198,6 +198,15 @@ public actor InferenceController {
 
     public func unload(role: ModelRole) async {
         guard handles[role] != nil else { return }
+        // Serialize with model loads so an unload can't interleave with an in-flight
+        // load for the same role (which would diverge `handles` from the backend's
+        // model dictionary). Invariant: no `loadGate` holder calls `unload` — the
+        // memory-pressure `perform(...)` actions and `loadModels` both invoke it from
+        // outside the gate — so there is no re-entrant deadlock. Acquire-or-return so
+        // a cancelled acquire never signals a permit it didn't take.
+        do { try await loadGate.wait() } catch { return }
+        defer { loadGate.signal() }
+        guard handles[role] != nil else { return } // may have been unloaded while waiting
         handles[role] = nil
         await backend.unloadDraftModel(forRole: role)
         await backend.unload(role: role)
