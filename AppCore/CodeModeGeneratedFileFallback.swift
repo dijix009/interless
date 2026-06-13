@@ -27,11 +27,16 @@ public enum CodeModeGeneratedFileFallback {
         let contents = stripped.contents.trimmingCharacters(in: .whitespacesAndNewlines)
         guard contents.utf8.count >= 80 else { return nil }
 
+        // Only auto-write when a path is explicit or strongly inferred: a leading
+        // `// filename` comment, an explicit path in the prompt or fence info, or
+        // the selected file for an edit request. We deliberately do NOT mint a
+        // name from prompt keywords — a normal answer that happens to contain a
+        // code block must not create a file the user never asked for. With no
+        // path, the model's code is still shown; the user saves it explicitly.
         let path = stripped.path
             ?? explicitPath(in: prompt)
             ?? explicitPath(in: block.info)
             ?? selectedEditTarget(prompt: prompt, selectedPath: selectedPath, fileTreePaths: fileTreePaths)
-            ?? inferredStandalonePath(prompt: prompt, language: block.language)
         guard let path = normalizedRelativePath(path) else { return nil }
         return CodeModeGeneratedFileCandidate(path: path, contents: contents + "\n")
     }
@@ -98,8 +103,13 @@ public enum CodeModeGeneratedFileFallback {
             guard let range = text.range(of: marker, range: cursor..<text.endIndex) else { return nil }
             let lineStart = text[..<range.lowerBound].lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex
             let prefix = text[lineStart..<range.lowerBound]
-            if prefix.trimmingCharacters(in: .whitespaces).isEmpty {
-                let lineEnd = text[range.upperBound...].firstIndex(of: "\n").map { text.index(after: $0) } ?? range.upperBound
+            let newlineIndex = text[range.upperBound...].firstIndex(of: "\n")
+            let suffix = text[range.upperBound..<(newlineIndex ?? text.endIndex)]
+            // Closing fence must be bare on its own line: a marker carrying an info
+            // string (an inner ```lang) is content, so nested fences don't truncate.
+            if prefix.trimmingCharacters(in: .whitespaces).isEmpty,
+               suffix.trimmingCharacters(in: .whitespaces).isEmpty {
+                let lineEnd = newlineIndex.map { text.index(after: $0) } ?? range.upperBound
                 return range.lowerBound..<lineEnd
             }
             cursor = range.upperBound
@@ -153,57 +163,6 @@ public enum CodeModeGeneratedFileFallback {
     private static func looksLikeEditRequest(_ prompt: String) -> Bool {
         let lower = prompt.lowercased()
         return ["edit", "update", "change", "modify", "fix"].contains { lower.contains($0) }
-    }
-
-    private static func inferredStandalonePath(prompt: String, language: String?) -> String? {
-        guard let ext = extensionFor(language: language, prompt: prompt) else { return nil }
-        let base = inferredBaseName(prompt: prompt)
-        return "\(base).\(ext)"
-    }
-
-    private static func extensionFor(language: String?, prompt: String) -> String? {
-        if let language {
-            switch language {
-            case "html", "htm": return "html"
-            case "javascript": return "js"
-            case "typescript": return "ts"
-            case "shell", "bash", "zsh": return "sh"
-            case "python": return "py"
-            case "markdown": return "md"
-            default:
-                if supportedExtensions.contains(language) { return language }
-            }
-        }
-        if let path = explicitPath(in: prompt),
-           let ext = path.split(separator: ".").last {
-            return String(ext).lowercased()
-        }
-        let lower = prompt.lowercased()
-        for ext in supportedExtensions.sorted(by: { $0.count > $1.count }) where lower.contains(".\(ext)") {
-            return ext == "htm" ? "html" : ext
-        }
-        return nil
-    }
-
-    private static func inferredBaseName(prompt: String) -> String {
-        let lower = prompt.lowercased()
-        if lower.contains("temp") || lower.contains("celsius") || lower.contains("fahrenheit") || lower.contains("kelvin") {
-            if lower.contains("convert") || lower.contains("converter") {
-                return "temperature-converter"
-            }
-            return "temperature"
-        }
-        let stopWords: Set<String> = [
-            "a", "an", "and", "app", "can", "code", "create", "file", "for", "generate",
-            "i", "in", "it", "make", "me", "new", "of", "page", "please", "save",
-            "script", "simple", "that", "the", "this", "to", "with", "write", "you"
-        ]
-        let words = lower
-            .split { !$0.isLetter && !$0.isNumber }
-            .map(String.init)
-            .filter { $0.count > 1 && !stopWords.contains($0) && !supportedExtensions.contains($0) }
-        let selected = words.prefix(4)
-        return selected.isEmpty ? "generated-file" : selected.joined(separator: "-")
     }
 
     private static func normalizedRelativePath(_ path: String?) -> String? {

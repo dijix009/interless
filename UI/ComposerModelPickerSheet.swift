@@ -261,20 +261,15 @@ struct ComposerModelPickerSheet: View {
               !modelStatus.isBusy
         else { return }
         dismiss()
-        DispatchQueue.main.async {
-            Task { @MainActor in
-                onSelectModelID(selected)
-            }
-        }
+        // Defer one hop so the sheet finishes dismissing before the callback
+        // mutates state (which may re-present or trigger a load). One Task hop is
+        // enough — the extra DispatchQueue.main.async was redundant.
+        Task { @MainActor in onSelectModelID(selected) }
     }
 
     @MainActor
     private func openSettings() {
         dismiss()
-        DispatchQueue.main.async {
-            Task { @MainActor in
-                onOpenSettings()
-            }
-        }
+        Task { @MainActor in onOpenSettings() }
     }
 }

@@ -355,6 +355,79 @@ struct AppCoreTests {
         #expect(!candidate.contents.contains("temperature-converter.html -->"))
     }
 
+    @Test func codeChatDoesNotAutoWriteGeneratedFileWhenWritesDisabled() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let response = """
+        Sure, here is the file:
+
+        ```html
+        <!-- temperature-converter.html -->
+        <!DOCTYPE html>
+        <html><head><title>Temperature Converter</title></head>
+        <body><h1>Temperature Converter</h1></body>
+        </html>
+        ```
+        """
+        let factory = FakeAppDependencyFactory(responseText: response)
+        let session = WorkspaceSessionModel(preferences: AppPreferences(defaults: testDefaults()), factory: factory)
+        // writes disabled (default) — the fallback must not fire
+        await session.openWorkspace(root)
+        await session.runChatPrompt("Can you create me a simple .html file that convert C to F and K?")
+        for _ in 0..<100 {
+            if session.chatMessages.contains(where: { $0.role == .assistant && !$0.isStreaming }) { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("temperature-converter.html").path))
+        #expect(!session.chatMessages.contains { $0.kind == "fileChanges" })
+        #expect(await factory.executedToolRequests.isEmpty)
+        #expect(session.permissionPrompt == nil)
+        // The model's code is still shown (sanitizer doesn't strip when nothing was written).
+        let assistant = try #require(session.chatMessages.first { $0.role == .assistant })
+        #expect(assistant.text.contains("<!DOCTYPE html>"))
+    }
+
+    @Test func sanitizerTreatsInfoBearingInnerFenceAsOneBlock() {
+        let text = "Here:\n```markdown\nintro\n```swift\nlet x = 1\n```\nthanks"
+        let out = CodeModeFinalAnswerSanitizer.sanitize(
+            text,
+            fileChanges: [ToolFileChange(path: "a.md", operation: .created, snapshotID: nil)],
+            minimumFenceCharacters: 10)
+        // The whole fenced block (incl. the inner ```swift) collapses to the
+        // reference, not split at the inner fence; trailing prose survives.
+        #expect(out.contains("written to `a.md`"))
+        #expect(!out.contains("let x = 1"))
+        #expect(out.contains("thanks"))
+    }
+
+    @Test func codeModeFallbackReturnsNilWithoutAnExplicitPath() {
+        // A mutation-like prompt + a >=80-byte code block but NO derivable path
+        // (no filename comment, no path in prompt/info, no selected file) must NOT
+        // mint a file from prompt keywords.
+        let response = """
+        Sure, here is an example:
+
+        ```html
+        <!DOCTYPE html>
+        <html><head><title>Example</title></head>
+        <body><h1>Hello world example page</h1></body>
+        </html>
+        ```
+        """
+        #expect(CodeModeGeneratedFileFallback.candidate(
+            prompt: "Can you write me a simple html page that says hello?",
+            assistantText: response,
+            selectedPath: nil) == nil)
+
+        // But an explicit path in the prompt still produces a candidate.
+        let candidate = CodeModeGeneratedFileFallback.candidate(
+            prompt: "Create the file pages/hello.html that says hello",
+            assistantText: response,
+            selectedPath: nil)
+        #expect(candidate?.path == "pages/hello.html")
+    }
+
     @Test func codeModeFinalAnswerSanitizerPreservesChatStyleCodeWhenNoFileWasWritten() {
         let text = """
         ```swift

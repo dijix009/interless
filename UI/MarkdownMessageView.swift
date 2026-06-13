@@ -24,7 +24,7 @@ public enum MarkdownMessageParser {
         var orderedStart = 1
         var codeLines: [String] = []
         var codeLanguage: String?
-        var activeFence: String?
+        var activeFence: (char: Character, length: Int)?
 
         func flushParagraph() {
             guard !paragraphLines.isEmpty else { return }
@@ -58,7 +58,12 @@ public enum MarkdownMessageParser {
 
         for line in lines {
             if let fence = activeFence {
-                if Self.fenceInfo(for: line)?.marker == fence {
+                // CommonMark: the closing fence must be a BARE run of the same
+                // char, at least as long as the opener. An inner ```lang line (or
+                // a shorter run) is content, not a close — so nested fences don't
+                // truncate the block.
+                if let run = Self.fenceRun(for: line),
+                   run.char == fence.char, run.length >= fence.length, run.info.isEmpty {
                     blocks.append(.code(language: codeLanguage, text: codeLines.joined(separator: "\n"), isClosed: true))
                     codeLines.removeAll()
                     codeLanguage = nil
@@ -69,10 +74,10 @@ public enum MarkdownMessageParser {
                 continue
             }
 
-            if let fence = Self.fenceInfo(for: line) {
+            if let run = Self.fenceRun(for: line) {
                 flushFlowBlocks()
-                activeFence = fence.marker
-                codeLanguage = fence.language
+                activeFence = (run.char, run.length)
+                codeLanguage = run.info.isEmpty ? nil : run.info
                 codeLines.removeAll()
                 continue
             }
@@ -136,18 +141,21 @@ public enum MarkdownMessageParser {
         line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private static func fenceInfo(for line: String) -> (marker: String, language: String?)? {
+    /// Leading fence run (≥3 of ``` or ~~~) plus the trimmed info string. Returns
+    /// the run length so the parser can require a closing fence to be at least as
+    /// long as the opener (and bare), per CommonMark.
+    private static func fenceRun(for line: String) -> (char: Character, length: Int, info: String)? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        let marker: String
-        if trimmed.hasPrefix("```") {
-            marker = "```"
-        } else if trimmed.hasPrefix("~~~") {
-            marker = "~~~"
-        } else {
-            return nil
+        guard let first = trimmed.first, first == "`" || first == "~" else { return nil }
+        var length = 0
+        var index = trimmed.startIndex
+        while index < trimmed.endIndex, trimmed[index] == first {
+            length += 1
+            index = trimmed.index(after: index)
         }
-        let language = trimmed.dropFirst(3).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (marker, language.isEmpty ? nil : language)
+        guard length >= 3 else { return nil }
+        let info = String(trimmed[index...]).trimmingCharacters(in: .whitespaces)
+        return (first, length, info)
     }
 
     private static func heading(for line: String) -> (level: Int, text: String)? {

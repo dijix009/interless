@@ -1528,7 +1528,13 @@ public final class WorkspaceSessionModel {
         sessionID: UUID?
     ) async -> String {
         var didWriteGeneratedFallback = false
-        if codeRunFileChanges[assistantID, default: []].isEmpty,
+        // Auto-write only when writes are outright allowed. Under `.ask` the
+        // fallback fires after the answer has already streamed, so a permission
+        // modal would pop for a write the user didn't visibly request; under
+        // `.deny` it would just throw. In both cases the model's code is still
+        // shown (the sanitizer runs below) and the user can save it via a tool.
+        if effectiveWritePermission == .allow,
+           codeRunFileChanges[assistantID, default: []].isEmpty,
            let environment,
            let prompt = codeRunPrompts[assistantID],
            let candidate = CodeModeGeneratedFileFallback.candidate(
@@ -2437,6 +2443,14 @@ public final class WorkspaceSessionModel {
             config: loadedWorkspaceConfig?.effective,
             settings: settings,
             resourceBudget: ResourceBudget.resolved(for: settings.resourceProfile)).settings
+    }
+
+    /// Effective write permission from the resolved tool policy (`.allow`/`.ask`/`.deny`).
+    private var effectiveWritePermission: ToolPermissionEffect {
+        RuntimeConfigMapper.resolve(
+            config: loadedWorkspaceConfig?.effective,
+            settings: settings,
+            resourceBudget: ResourceBudget.resolved(for: settings.resourceProfile)).toolPolicy.writePermission
     }
 
     private func publish(_ event: AppEvent) async {
