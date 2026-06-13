@@ -94,6 +94,8 @@ public final class WorkspaceSessionModel {
     @ObservationIgnored private var activeModelLoadID: UUID?
     @ObservationIgnored private var cancelledModelLoadIDs: Set<UUID> = []
     @ObservationIgnored private var generationStats: [UUID: MessageGenerationStats] = [:]
+    @ObservationIgnored private var codeRunFileChanges: [UUID: [ToolFileChange]] = [:]
+    @ObservationIgnored private var codeRunPrompts: [UUID: String] = [:]
     /// Per-assistant buffered streamed text, applied to the transcript in coalesced
     /// flushes (~every `tokenFlushThresholdCharacters`) instead of once per token,
     /// to cut MainActor publishes / viewState rebuilds during streaming.
@@ -450,6 +452,30 @@ public final class WorkspaceSessionModel {
         }
     }
 
+    public func revertSnapshot(_ snapshotID: String) async {
+        guard let environment else {
+            appendNotice(severity: .warning, title: "No workspace", message: "Open a workspace before reverting changes.")
+            return
+        }
+        do {
+            let result = try await environment.revertSnapshot(snapshotID)
+            await refreshGit()
+            await reloadFileTree()
+            appendNotice(
+                severity: .info,
+                title: "Changes reverted",
+                message: "Restored \(result.restoredPaths.count) and removed \(result.removedPaths.count) path(s).")
+            await publish(.init(kind: .patch, message: "Snapshot reverted", metadata: [
+                "snapshotID": snapshotID,
+                "restored": "\(result.restoredPaths.count)",
+                "removed": "\(result.removedPaths.count)",
+            ]))
+        } catch {
+            appendNotice(severity: .error, title: "Revert failed", message: String(describing: error))
+            await recordFailure(kind: .patch, message: "Snapshot revert failed: \(error)")
+        }
+    }
+
     public func setPatchHunkAccepted(fileID: String, hunkID: Int, isAccepted: Bool) {
         patchProposal?.setHunkAccepted(fileID: fileID, hunkID: hunkID, isAccepted: isAccepted)
     }
@@ -791,6 +817,8 @@ public final class WorkspaceSessionModel {
             modelID: responseModelID,
             reasoningEffort: responseReasoningEffort))
         generationStats[assistantID] = MessageGenerationStats()
+        codeRunFileChanges[assistantID] = []
+        codeRunPrompts[assistantID] = promptText
         await persistSessionUserPrompt(sessionID: sessionID, promptText: promptText, messageID: userID)
         let conversationContext = await conversationContextBundle(
             prompt: promptText,
@@ -799,6 +827,7 @@ public final class WorkspaceSessionModel {
             environment: environment)
         var observations = conversationContext.observations
         observations.append(contentsOf: await workspaceChatObservations(environment: environment, prompt: promptText))
+        observations.append(Self.codeModeToolFirstObservation(selectedFilePath: selectedFilePath))
         // Re-inject the agent's own open plan each turn (Claude Code-style):
         // without this, todos persist to storage but the model forgets them.
         if let todoObservation = await openTodosObservation(sessionID: sessionID) {
@@ -826,7 +855,7 @@ public final class WorkspaceSessionModel {
                     runSettings,
                     toolRuntimeHooks(sessionID: sessionID))
                 for try await event in stream {
-                    handleAgentEvent(event, assistantID: assistantID, sessionID: sessionID)
+                    await handleAgentEvent(event, assistantID: assistantID, sessionID: sessionID)
                 }
                 finishStreamingMessage(id: assistantID)
                 await persistSessionAssistantMessage(sessionID: sessionID, id: assistantID)
@@ -836,6 +865,8 @@ public final class WorkspaceSessionModel {
                 await finishRecovery(recovery, status: .completed)
                 await publish(.init(kind: .chat, message: "Agent chat completed"))
                 await refreshChatThreads()
+                codeRunFileChanges[assistantID] = nil
+                codeRunPrompts[assistantID] = nil
             } catch is CancellationError {
                 finishStreamingMessage(id: assistantID)
                 let toolID = appendTool("Chat cancelled")
@@ -846,6 +877,8 @@ public final class WorkspaceSessionModel {
                 await finishRecovery(recovery, status: .cancelled, message: "Cancelled")
                 await recordCancellation(kind: .chat, message: "Agent chat cancelled")
                 await refreshChatThreads()
+                codeRunFileChanges[assistantID] = nil
+                codeRunPrompts[assistantID] = nil
             } catch {
                 finishStreamingMessage(id: assistantID)
                 let errorID = appendTranscriptError("Agent failed: \(error)")
@@ -857,6 +890,8 @@ public final class WorkspaceSessionModel {
                 await finishRecovery(recovery, status: .failed, message: String(describing: error))
                 await recordFailure(kind: .chat, message: String(describing: error))
                 await refreshChatThreads()
+                codeRunFileChanges[assistantID] = nil
+                codeRunPrompts[assistantID] = nil
             }
         }
     }
@@ -1381,7 +1416,7 @@ public final class WorkspaceSessionModel {
         }
     }
 
-    private func handleAgentEvent(_ event: AgentEvent, assistantID: UUID, sessionID: UUID?) {
+    private func handleAgentEvent(_ event: AgentEvent, assistantID: UUID, sessionID: UUID?) async {
         // Flush buffered streamed text before any non-token event mutates the
         // transcript, so ordering with tool/route/completion events is preserved.
         if case .token = event {} else { flushPendingStreamedText(id: assistantID) }
@@ -1410,6 +1445,34 @@ public final class WorkspaceSessionModel {
                 await publish(.init(kind: .tool, message: "Tool started", metadata: ["tool": request.displayName]))
             }
         case .toolFinished(let result):
+            if !result.fileChanges.isEmpty {
+                codeRunFileChanges[assistantID, default: []].append(contentsOf: result.fileChanges)
+                let id = appendFileChangeSummary(result.fileChanges, diffFiles: diffFiles)
+                Task {
+                    await recordSessionEvent(sessionID: sessionID, kind: .toolCallSettled, messageID: id, payload: [
+                        "tool": result.request.displayName,
+                        "exitCode": result.exitCode.map(String.init) ?? "n/a",
+                        "fileChanges": result.fileChanges.map(\.path).joined(separator: ","),
+                    ])
+                    await recordRecoveryInstant(
+                        .toolExecution,
+                        title: "Tool \(result.request.displayName)",
+                        status: result.exitCode == 0 || result.exitCode == nil ? .completed : .failed,
+                        message: result.exitCode.map { "exit=\($0)" },
+                        metadata: workspaceRecoveryMetadata([
+                            "tool": result.request.displayName,
+                            "exitCode": result.exitCode.map(String.init) ?? "n/a",
+                            "files": result.fileChanges.map(\.path).joined(separator: ","),
+                        ]))
+                    await publish(.init(kind: .tool, message: "Tool changed files", metadata: [
+                        "tool": result.request.displayName,
+                        "files": "\(result.fileChanges.count)",
+                    ]))
+                    await refreshGit()
+                    await updateFileChangeSummary(messageID: id, changes: result.fileChanges, sessionID: sessionID)
+                }
+                return
+            }
             let text = "Finished \(result.request.displayName) exit=\(result.exitCode.map(String.init) ?? "n/a")"
             let id = appendTool(text)
             Task {
@@ -1444,7 +1507,11 @@ public final class WorkspaceSessionModel {
             Task { await persistSessionMessagePart(sessionID: sessionID, messageID: id, role: .system, kind: "context", text: text) }
         case .completed(let result):
             updateGenerationSpeed(for: assistantID, info: result.completionInfo)
-            replaceMessage(id: assistantID, text: result.text, isStreaming: false)
+            let sanitized = await finalizedCodeModeAssistantText(
+                result.text,
+                assistantID: assistantID,
+                sessionID: sessionID)
+            replaceMessage(id: assistantID, text: sanitized, isStreaming: false)
         case .failed(let reason):
             let id = appendTranscriptError(reason)
             Task {
@@ -1453,6 +1520,60 @@ public final class WorkspaceSessionModel {
             }
             appendNotice(severity: .error, title: "Agent failed", message: reason)
         }
+    }
+
+    private func finalizedCodeModeAssistantText(
+        _ text: String,
+        assistantID: UUID,
+        sessionID: UUID?
+    ) async -> String {
+        var didWriteGeneratedFallback = false
+        if codeRunFileChanges[assistantID, default: []].isEmpty,
+           let environment,
+           let prompt = codeRunPrompts[assistantID],
+           let candidate = CodeModeGeneratedFileFallback.candidate(
+            prompt: prompt,
+            assistantText: text,
+            selectedPath: selectedFilePath,
+            fileTreePaths: flattenFileTree(fileTree).filter { !$0.isDirectory }.map(\.path)
+           ) {
+            do {
+                let result = try await environment.executeTool(
+                    .writeFile(path: candidate.path, contents: candidate.contents),
+                    settings,
+                    toolRuntimeHooks(sessionID: sessionID))
+                if !result.fileChanges.isEmpty {
+                    codeRunFileChanges[assistantID, default: []].append(contentsOf: result.fileChanges)
+                    let id = appendFileChangeSummary(result.fileChanges, diffFiles: diffFiles)
+                    await recordSessionEvent(sessionID: sessionID, kind: .toolCallSettled, messageID: id, payload: [
+                        "tool": result.request.displayName,
+                        "exitCode": result.exitCode.map(String.init) ?? "n/a",
+                        "fileChanges": result.fileChanges.map(\.path).joined(separator: ","),
+                        "source": "code-mode-fallback",
+                    ])
+                    await publish(.init(kind: .tool, message: "Code mode wrote generated file", metadata: [
+                        "files": "\(result.fileChanges.count)",
+                    ]))
+                    didWriteGeneratedFallback = true
+                    await refreshGit()
+                    await reloadFileTree()
+                    await updateFileChangeSummary(messageID: id, changes: result.fileChanges, sessionID: sessionID)
+                }
+            } catch {
+                let id = appendTool("Generated file was not written: \(error)")
+                await persistSessionMessagePart(
+                    sessionID: sessionID,
+                    messageID: id,
+                    role: .tool,
+                    kind: "toolRejected",
+                    text: "Generated file was not written: \(error)")
+                appendNotice(severity: .warning, title: "File not written", message: String(describing: error))
+            }
+        }
+        return CodeModeFinalAnswerSanitizer.sanitize(
+            text,
+            fileChanges: codeRunFileChanges[assistantID, default: []],
+            minimumFenceCharacters: didWriteGeneratedFallback ? 0 : 600)
     }
 
     private func handlePlainChatEvent(_ event: AgentEvent, assistantID: UUID, sessionID: UUID?) {
@@ -1586,6 +1707,97 @@ public final class WorkspaceSessionModel {
     }
 
     @discardableResult
+    private func appendFileChangeSummary(_ changes: [ToolFileChange], diffFiles: [DiffFile]) -> UUID {
+        let id = UUID()
+        let summary = Self.fileChangeSummary(changes: changes, diffFiles: diffFiles)
+        chatMessages.append(.init(
+            id: id,
+            role: .tool,
+            kind: "fileChanges",
+            text: Self.encodedToolSummary(summary),
+            isCollapsed: false,
+            toolSummary: summary))
+        trimChatTranscript()
+        return id
+    }
+
+    private func updateFileChangeSummary(
+        messageID: UUID,
+        changes: [ToolFileChange],
+        sessionID: UUID?
+    ) async {
+        await refreshDiff(path: nil)
+        let summary = Self.fileChangeSummary(changes: changes, diffFiles: diffFiles)
+        if let index = chatMessages.firstIndex(where: { $0.id == messageID }) {
+            chatMessages[index].toolSummary = summary
+            chatMessages[index].text = Self.encodedToolSummary(summary)
+            chatMessages[index].isCollapsed = false
+        }
+        await persistSessionMessagePart(
+            sessionID: sessionID,
+            messageID: messageID,
+            role: .tool,
+            kind: "fileChanges",
+            text: Self.encodedToolSummary(summary))
+    }
+
+    private static func fileChangeSummary(
+        changes: [ToolFileChange],
+        diffFiles: [DiffFile]
+    ) -> ChatToolSummaryViewState {
+        let uniqueChanges = changes.reduce(into: [String: ToolFileChange]()) { partial, change in
+            partial[change.path] = change
+        }
+        let files = uniqueChanges.values
+            .sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            .map { change in
+                let diff = diffFiles.first { file in
+                    file.newPath == change.path || file.oldPath == change.path || file.id == change.path
+                }
+                return ChangedFileSummaryViewState(
+                    path: change.path,
+                    operation: change.operation.rawValue,
+                    additions: diff?.additions,
+                    deletions: diff?.deletions)
+            }
+        let operation = files.allSatisfy { $0.operation == ToolFileChange.Operation.created.rawValue }
+            ? "Created"
+            : "Edited"
+        let fileLabel = files.count == 1 ? "file" : "files"
+        let additions = files.compactMap(\.additions).reduce(0, +)
+        let deletions = files.compactMap(\.deletions).reduce(0, +)
+        let hasStats = files.contains { $0.additions != nil || $0.deletions != nil }
+        let snapshotID = Self.summarySnapshotID(changes)
+        return ChatToolSummaryViewState(
+            title: "\(operation) \(files.count) \(fileLabel)",
+            subtitle: hasStats ? "+\(additions) -\(deletions)" : nil,
+            files: files,
+            snapshotID: snapshotID,
+            canReview: true,
+            canUndo: snapshotID != nil)
+    }
+
+    private static func summarySnapshotID(_ changes: [ToolFileChange]) -> String? {
+        let ids = Set(changes.compactMap(\.snapshotID).filter { !$0.isEmpty })
+        return ids.count == 1 ? ids.first : nil
+    }
+
+    private static func encodedToolSummary(_ summary: ChatToolSummaryViewState) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(summary),
+              let text = String(data: data, encoding: .utf8) else {
+            return summary.title
+        }
+        return text
+    }
+
+    private static func decodedToolSummary(_ text: String) -> ChatToolSummaryViewState? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(ChatToolSummaryViewState.self, from: data)
+    }
+
+    @discardableResult
     private func appendTranscriptError(_ text: String) -> UUID {
         let id = UUID()
         chatMessages.append(.init(id: id, role: .error, text: text))
@@ -1640,6 +1852,25 @@ public final class WorkspaceSessionModel {
             flattenedFileTree: flattenFileTree(fileTree),
             snippetLimit: snippetLimit))
         return observations
+    }
+
+    private static func codeModeToolFirstObservation(selectedFilePath: String?) -> String {
+        var lines = [
+            "Code mode file-change contract:",
+            "- For file creation or editing requests, use native write_file, edit_file, or apply_patch tools when available.",
+            "- Use explicit paths from the latest request first.",
+            "- Prefer mentioned @file/@dir context or the selected file/directory when it is relevant.",
+            "- Inspect the workspace tree and conventional folders such as src, public, scripts, Tests, Sources, package roots, or app-specific directories before choosing a path.",
+            "- For a simple standalone script with no better target, create a descriptive file at the workspace root, for example temperature-converter.html.",
+            "- If multiple target folders are plausible, use the question tool instead of guessing.",
+            "- After successful writes, answer concisely with changed files, what was done, validation status, and the next useful action. Do not paste full file contents unless explicitly asked.",
+            "- If write tools are unavailable, denied, or unsupported by the selected model/tool-call format, do not claim anything was saved; explain the blocker.",
+            "The latest request is authoritative."
+        ]
+        if let selectedFilePath {
+            lines.insert("- Current selected path: \(selectedFilePath)", at: 4)
+        }
+        return lines.joined(separator: "\n")
     }
 
     private func workspaceInstructionObservation(
@@ -2679,6 +2910,17 @@ public final class WorkspaceSessionModel {
     }
 
     private static func chatMessageViewState(from part: SessionMessagePart) -> ChatMessageViewState? {
+        if part.kind == "fileChanges",
+           let summary = decodedToolSummary(part.text) {
+            return ChatMessageViewState(
+                id: part.messageID,
+                role: .tool,
+                kind: part.kind,
+                text: part.text,
+                isCollapsed: false,
+                timestamp: part.createdAt,
+                toolSummary: summary)
+        }
         let role: ChatMessageRole
         switch part.role {
         case .system:
@@ -2693,6 +2935,7 @@ public final class WorkspaceSessionModel {
         return ChatMessageViewState(
             id: part.messageID,
             role: role,
+            kind: part.kind,
             text: part.text,
             isCollapsed: role == .tool || role == .system,
             timestamp: part.createdAt,

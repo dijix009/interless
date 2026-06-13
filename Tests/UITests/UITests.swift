@@ -73,6 +73,76 @@ struct UITests {
         #expect(files[1].additions == 1)
     }
 
+    @Test func markdownMessageParserParsesFencedCodeBlocks() {
+        let blocks = MarkdownMessageParser.parse("""
+        Sure.
+
+        ```html
+        <!DOCTYPE html>
+        <title>Temperature</title>
+        ```
+        """)
+
+        #expect(blocks == [
+            .paragraph("Sure."),
+            .code(language: "html", text: "<!DOCTYPE html>\n<title>Temperature</title>", isClosed: true),
+        ])
+    }
+
+    @Test func markdownMessageParserTreatsOpenFenceAsStreamingCode() {
+        let blocks = MarkdownMessageParser.parse("""
+        ```swift
+        let value = 42
+        """)
+
+        #expect(blocks == [
+            .code(language: "swift", text: "let value = 42", isClosed: false),
+        ])
+    }
+
+    @Test func markdownMessageParserParsesCommonAssistantBlocks() {
+        let blocks = MarkdownMessageParser.parse("""
+        ## Summary
+
+        - **Fast** rendering
+        - Native SwiftUI
+
+        1. Parse
+        2. Render
+
+        > Latest request stays authoritative.
+
+        ---
+        """)
+
+        #expect(blocks == [
+            .heading(level: 2, text: "Summary"),
+            .unorderedList(["**Fast** rendering", "Native SwiftUI"]),
+            .orderedList(start: 1, items: ["Parse", "Render"]),
+            .blockquote("Latest request stays authoritative."),
+            .horizontalRule,
+        ])
+    }
+
+    @Test func assistantMessagesUseNativeMarkdownRenderer() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let chatPane = try String(
+            contentsOf: root.appendingPathComponent("UI/ChatPaneView.swift"),
+            encoding: .utf8)
+        let renderer = try String(
+            contentsOf: root.appendingPathComponent("UI/MarkdownMessageView.swift"),
+            encoding: .utf8)
+
+        #expect(chatPane.contains("MarkdownMessageView(text)"))
+        #expect(renderer.contains("public enum MarkdownBlock"))
+        #expect(renderer.contains("CodeBlockView(language: language, code: text, isClosed: isClosed)"))
+        #expect(!renderer.contains("WKWebView"))
+        #expect(!renderer.contains("WebView"))
+    }
+
     @Test func parityPanelPresentationModelsAreStable() {
         let permission = PermissionPromptViewState(
             title: "Allow write",
@@ -299,6 +369,7 @@ struct UITests {
             "UI/WorkspaceView.swift",
             "UI/WorkspaceInspectorView.swift",
             "UI/ChatPaneView.swift",
+            "UI/MarkdownMessageView.swift",
             "UI/SettingsHubView.swift",
             "UI/SessionNavigatorView.swift",
         ]
@@ -518,13 +589,47 @@ struct UITests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let contents = try String(
+        let chatPaneContents = try String(
             contentsOf: root.appendingPathComponent("UI/ChatPaneView.swift"),
             encoding: .utf8)
+        let pickerContents = try String(
+            contentsOf: root.appendingPathComponent("UI/ComposerModelPickerSheet.swift"),
+            encoding: .utf8)
 
-        #expect(contents.contains("mlx-community/gemma-2-2b-it-4bit"))
-        #expect(contents.contains("Download and load"))
-        #expect(contents.contains("pastedDownloadCandidate"))
+        #expect(pickerContents.contains("mlx-community/gemma-2-2b-it-4bit"))
+        #expect(chatPaneContents.contains("isModelPickerSheetPresented"))
+        #expect(chatPaneContents.contains(".sheet(isPresented: $isModelPickerSheetPresented)"))
+        #expect(chatPaneContents.contains("ComposerModelPickerSheet"))
+        #expect(!chatPaneContents.contains("isModelPickerPresented"))
+        #expect(!chatPaneContents.contains("modelPickerPopover"))
+        #expect(!chatPaneContents.contains("selectModelFromMenu"))
+        #expect(!pickerContents.contains(".popover"))
+        #expect(!pickerContents.contains("MANUAL MODEL ID"))
+        #expect(!pickerContents.contains("manualModelID"))
+        #expect(pickerContents.contains("Download and load"))
+    }
+
+    @Test func composerModelPickerFiltersAndValidatesManualIDs() {
+        let models = [
+            "mlx-community/Llama-3.2-1B-Instruct-4bit",
+            "mlx-community/gemma-2-2b-it-4bit",
+        ]
+
+        #expect(ComposerModelPickerModel.filteredModelIDs(models, query: "gemma") == [
+            "mlx-community/gemma-2-2b-it-4bit",
+        ])
+        #expect(ComposerModelPickerModel.downloadCandidate(
+            from: "mlx-community/gemma-2-2b-it-4bit",
+            availableModels: []) == "mlx-community/gemma-2-2b-it-4bit")
+        #expect(ComposerModelPickerModel.downloadCandidate(
+            from: "mlx-community/gemma-2-2b-it-4bit",
+            availableModels: models) == nil)
+        #expect(ComposerModelPickerModel.downloadCandidateValidationMessage("mlx-community/Qwen3.5-2B-OptiQ-4bit")?.contains("OptiQ") == true)
+        #expect(ComposerModelPickerModel.downloadCandidate(
+            from: "mlx-community/Qwen3.5-2B-OptiQ-4bit",
+            availableModels: []) == nil)
+        #expect(ComposerModelPickerModel.downloadCandidateValidationMessage("gemma") == nil)
+        #expect(ComposerModelPickerModel.downloadCandidate(from: "gemma", availableModels: []) == nil)
     }
 
     @Test func onboardingProvidesArchitectureRecommendedModels() {
@@ -555,6 +660,44 @@ struct UITests {
 
         #expect(message.isToolEvent)
         #expect(message.isCollapsed)
+    }
+
+    @Test func changedFileSummaryMessagesRenderAsToolCards() throws {
+        let summary = ChatToolSummaryViewState(
+            title: "Created 1 file",
+            subtitle: "+12 -0",
+            files: [
+                ChangedFileSummaryViewState(
+                    path: "temperature-converter.html",
+                    operation: "created",
+                    additions: 12,
+                    deletions: 0)
+            ],
+            snapshotID: UUID().uuidString,
+            canReview: true,
+            canUndo: true)
+        let message = ChatMessageViewState(
+            role: .tool,
+            kind: "fileChanges",
+            text: "{}",
+            isCollapsed: false,
+            toolSummary: summary)
+
+        #expect(message.kind == "fileChanges")
+        #expect(message.toolSummary?.files.first?.path == "temperature-converter.html")
+        #expect(message.isToolEvent)
+        #expect(!message.isCollapsed)
+
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let contents = try String(
+            contentsOf: root.appendingPathComponent("UI/ChatPaneView.swift"),
+            encoding: .utf8)
+        #expect(contents.contains("changedFilesCard(summary)"))
+        #expect(contents.contains("onReviewChangedFiles()"))
+        #expect(contents.contains("onRevertSnapshot(snapshotID)"))
     }
 
     @Test func uiTargetDoesNotImportRuntimeModules() throws {

@@ -55,9 +55,19 @@ public actor ToolExecutionLoop {
                 throw ToolError.writeTooLarge(bytes: byteCount, limit: policy.maxWriteBytes)
             }
             let url = try resolve(path: path, mustExist: false)
-            let snapshotID = try await recordMutation(paths: [relativePath(for: url)], reason: "write_file")
+            let relativePath = relativePath(for: url)
+            let operation: ToolFileChange.Operation = FileManager.default.fileExists(atPath: url.path) ? .edited : .created
+            let snapshotID = try await recordMutation(paths: [relativePath], reason: "write_file")
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true)
             try contents.write(to: url, atomically: true, encoding: .utf8)
-            return await manage(ToolResult(request: request, stdout: path, didWrite: true, snapshotID: snapshotID))
+            return await manage(ToolResult(
+                request: request,
+                stdout: path,
+                didWrite: true,
+                snapshotID: snapshotID,
+                fileChanges: [ToolFileChange(path: relativePath, operation: operation, snapshotID: snapshotID)]))
 
         case let .editFile(path, old, new, replaceAll):
             let result = try await editFile(path: path, old: old, new: new, replaceAll: replaceAll, request: request)
@@ -215,7 +225,12 @@ public actor ToolExecutionLoop {
         let snapshotID = try await recordMutation(paths: [relativePath(for: url)], reason: "edit_file")
         try updated.write(to: url, atomically: true, encoding: .utf8)
         let verification = Self.verifiedSummary(url: url).map { "\n" + $0 } ?? ""
-        return ToolResult(request: request, stdout: path + verification, didWrite: true, snapshotID: snapshotID)
+        return ToolResult(
+            request: request,
+            stdout: path + verification,
+            didWrite: true,
+            snapshotID: snapshotID,
+            fileChanges: [ToolFileChange(path: relativePath(for: url), operation: .edited, snapshotID: snapshotID)])
     }
 
     private func replaceFirst(_ target: String, with replacement: String, in text: String) -> String {
@@ -235,6 +250,11 @@ public actor ToolExecutionLoop {
         // New files (`--- /dev/null` + all-addition hunks) are allowed: resolve
         // without requiring existence and apply against empty contents.
         let urls = try files.map { try resolve(path: $0.path, mustExist: false) }
+        let fileChanges = zip(paths, urls).map { path, url in
+            ToolFileChange(
+                path: path,
+                operation: FileManager.default.fileExists(atPath: url.path) ? .edited : .created)
+        }
         let snapshotID = try await recordMutation(paths: paths, reason: "apply_patch")
         for (filePatch, url) in zip(files, urls) {
             let exists = FileManager.default.fileExists(atPath: url.path)
@@ -265,7 +285,10 @@ public actor ToolExecutionLoop {
             request: request,
             stdout: paths.joined(separator: "\n") + (verification.isEmpty ? "" : "\n" + verification),
             didWrite: true,
-            snapshotID: snapshotID)
+            snapshotID: snapshotID,
+            fileChanges: fileChanges.map {
+                ToolFileChange(path: $0.path, operation: $0.operation, snapshotID: snapshotID)
+            })
     }
 
     /// Post-write verification line fed back to the model: re-reads the file so

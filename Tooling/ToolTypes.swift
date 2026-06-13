@@ -51,6 +51,23 @@ public enum ToolRequest: Sendable, Equatable, Codable {
     }
 }
 
+public struct ToolFileChange: Sendable, Equatable, Codable, Hashable {
+    public enum Operation: String, Sendable, Equatable, Codable, Hashable, CaseIterable {
+        case created
+        case edited
+    }
+
+    public var path: String
+    public var operation: Operation
+    public var snapshotID: String?
+
+    public init(path: String, operation: Operation, snapshotID: String? = nil) {
+        self.path = path
+        self.operation = operation
+        self.snapshotID = snapshotID
+    }
+}
+
 public struct ToolResult: Sendable, Equatable, Codable {
     public var request: ToolRequest
     public var exitCode: Int32?
@@ -60,6 +77,7 @@ public struct ToolResult: Sendable, Equatable, Codable {
     public var timedOut: Bool
     public var snapshotID: String?
     public var outputRef: ManagedToolOutputRef?
+    public var fileChanges: [ToolFileChange]
 
     public init(
         request: ToolRequest,
@@ -69,7 +87,8 @@ public struct ToolResult: Sendable, Equatable, Codable {
         didWrite: Bool = false,
         timedOut: Bool = false,
         snapshotID: String? = nil,
-        outputRef: ManagedToolOutputRef? = nil
+        outputRef: ManagedToolOutputRef? = nil,
+        fileChanges: [ToolFileChange] = []
     ) {
         self.request = request
         self.exitCode = exitCode
@@ -79,6 +98,37 @@ public struct ToolResult: Sendable, Equatable, Codable {
         self.timedOut = timedOut
         self.snapshotID = snapshotID
         self.outputRef = outputRef
+        self.fileChanges = fileChanges
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case request, exitCode, stdout, stderr, didWrite, timedOut, snapshotID, outputRef, fileChanges
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        request = try container.decode(ToolRequest.self, forKey: .request)
+        exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode)
+        stdout = try container.decode(String.self, forKey: .stdout)
+        stderr = try container.decode(String.self, forKey: .stderr)
+        didWrite = try container.decode(Bool.self, forKey: .didWrite)
+        timedOut = try container.decode(Bool.self, forKey: .timedOut)
+        snapshotID = try container.decodeIfPresent(String.self, forKey: .snapshotID)
+        outputRef = try container.decodeIfPresent(ManagedToolOutputRef.self, forKey: .outputRef)
+        fileChanges = try container.decodeIfPresent([ToolFileChange].self, forKey: .fileChanges) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(request, forKey: .request)
+        try container.encodeIfPresent(exitCode, forKey: .exitCode)
+        try container.encode(stdout, forKey: .stdout)
+        try container.encode(stderr, forKey: .stderr)
+        try container.encode(didWrite, forKey: .didWrite)
+        try container.encode(timedOut, forKey: .timedOut)
+        try container.encodeIfPresent(snapshotID, forKey: .snapshotID)
+        try container.encodeIfPresent(outputRef, forKey: .outputRef)
+        try container.encode(fileChanges, forKey: .fileChanges)
     }
 }
 

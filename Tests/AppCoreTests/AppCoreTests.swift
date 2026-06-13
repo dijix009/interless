@@ -5,6 +5,7 @@ import AppCore
 import Core
 import Persistence
 import Shared
+import Tooling
 import UI
 import Workspace
 
@@ -228,6 +229,140 @@ struct AppCoreTests {
         #expect(task.observations.contains { $0.contains("Current workspace folder: work") })
         #expect(task.observations.contains { $0.contains("Top-level workspace entries: README.md") })
         #expect(task.observations.contains { $0.contains("README.md:") && $0.contains("contents of README.md") })
+        #expect(task.observations.contains { $0.contains("Code mode file-change contract") && $0.contains("write_file") })
+        #expect(task.observations.contains { $0.contains("temperature-converter.html") && $0.contains("question tool") })
+    }
+
+    @Test func codeChatShowsChangedFileCardAndSanitizesLargeGeneratedFileDump() async throws {
+        let longHTML = String(repeating: "<div>temperature converter</div>\n", count: 80)
+        let response = """
+        I wrote the file.
+
+        ```html
+        \(longHTML)
+        ```
+        """
+        let snapshotID = UUID().uuidString
+        let factory = FakeAppDependencyFactory(
+            responseText: response,
+            toolResult: ToolResult(
+                request: .writeFile(path: "temperature-converter.html", contents: longHTML),
+                stdout: "temperature-converter.html",
+                didWrite: true,
+                snapshotID: snapshotID,
+                fileChanges: [
+                    ToolFileChange(path: "temperature-converter.html", operation: .created, snapshotID: snapshotID)
+                ]))
+        let session = WorkspaceSessionModel(preferences: AppPreferences(defaults: testDefaults()), factory: factory)
+        await session.openWorkspace(URL(fileURLWithPath: "/tmp/work"))
+
+        await session.runChatPrompt("Create a simple html temperature converter.")
+        for _ in 0..<100 {
+            if session.chatMessages.contains(where: { $0.role == .assistant && !$0.isStreaming }) { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let summary = try #require(session.chatMessages.first { $0.kind == "fileChanges" }?.toolSummary)
+        #expect(summary.title == "Created 1 file")
+        #expect(summary.files.map(\.path) == ["temperature-converter.html"])
+        #expect(summary.snapshotID == snapshotID)
+        #expect(summary.canUndo)
+        #expect(summary.canReview)
+
+        let assistant = try #require(session.chatMessages.first { $0.role == .assistant })
+        #expect(assistant.text.contains("written to `temperature-converter.html`"))
+        #expect(!assistant.text.contains(longHTML.prefix(80)))
+    }
+
+    @Test func codeChatWritesGeneratedMarkdownFileWhenModelIgnoresToolCalls() async throws {
+        let root = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let response = """
+        Sure, here is the file:
+
+        ```html
+        <!-- temperature-converter.html -->
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Temperature Converter</title>
+        </head>
+        <body>
+            <h1>Temperature Converter</h1>
+            <script>
+                function convert() {
+                    return "converted";
+                }
+            </script>
+        </body>
+        </html>
+        ```
+        """
+        let factory = FakeAppDependencyFactory(responseText: response)
+        let session = WorkspaceSessionModel(preferences: AppPreferences(defaults: testDefaults()), factory: factory)
+        session.settings.allowWrites = true
+        await session.openWorkspace(root)
+
+        await session.runChatPrompt("Can you create me a simple .html file that convert C to F and K?")
+        for _ in 0..<100 {
+            if session.chatMessages.contains(where: { $0.kind == "fileChanges" }),
+               session.chatMessages.contains(where: { $0.role == .assistant && !$0.isStreaming }) {
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let writtenURL = root.appendingPathComponent("temperature-converter.html")
+        #expect(FileManager.default.fileExists(atPath: writtenURL.path))
+        let written = try String(contentsOf: writtenURL, encoding: .utf8)
+        #expect(written.contains("<!DOCTYPE html>"))
+        #expect(!written.contains("temperature-converter.html -->"))
+        let summary = try #require(session.chatMessages.first { $0.kind == "fileChanges" }?.toolSummary)
+        #expect(summary.title == "Created 1 file")
+        #expect(summary.files.map(\.path) == ["temperature-converter.html"])
+        let assistant = try #require(session.chatMessages.first { $0.role == .assistant })
+        #expect(assistant.text.contains("written to `temperature-converter.html`"))
+        #expect(!assistant.text.contains("<!DOCTYPE html>"))
+        let executed = await factory.executedToolRequests
+        #expect(executed == [.writeFile(path: "temperature-converter.html", contents: written)])
+    }
+
+    @Test func codeModeGeneratedFileFallbackExtractsHtmlFilenameComment() throws {
+        let response = """
+        Sure, here is the file:
+
+        ```html
+        <!-- temperature-converter.html -->
+        <!DOCTYPE html>
+        <html>
+        <head><title>Temperature Converter</title></head>
+        <body>
+            <h1>Temperature Converter</h1>
+            <script>
+                function convert() { return "converted"; }
+            </script>
+        </body>
+        </html>
+        ```
+        """
+
+        let candidate = try #require(CodeModeGeneratedFileFallback.candidate(
+            prompt: "Can you create me a simple .html file that convert C to F and K?",
+            assistantText: response,
+            selectedPath: nil))
+        #expect(candidate.path == "temperature-converter.html")
+        #expect(candidate.contents.contains("<!DOCTYPE html>"))
+        #expect(!candidate.contents.contains("temperature-converter.html -->"))
+    }
+
+    @Test func codeModeFinalAnswerSanitizerPreservesChatStyleCodeWhenNoFileWasWritten() {
+        let text = """
+        ```swift
+        print("hello")
+        ```
+        """
+
+        #expect(CodeModeFinalAnswerSanitizer.sanitize(text, fileChanges: []) == text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
     @Test func codeChatIncludesWorkspaceInstructionsPromptReferencesAndEpoch() async throws {
@@ -1046,22 +1181,26 @@ private actor FakeAppDependencyFactory: AppDependencyFactory {
     var makeCount = 0
     var loadSettings: [ModelSettingsViewState] = []
     var runTasks: [AgentTask] = []
+    var executedToolRequests: [ToolRequest] = []
     var configs: [LoadedInterlessConfig?] = []
     let responseText: String
     let longRunningAgent: Bool
     let longRunningLoad: Bool
     let completionStopReason: String
+    let toolResult: ToolResult?
 
     init(
         responseText: String = "answer",
         longRunningAgent: Bool = false,
         longRunningLoad: Bool = false,
-        completionStopReason: String = ""
+        completionStopReason: String = "",
+        toolResult: ToolResult? = nil
     ) {
         self.responseText = responseText
         self.longRunningAgent = longRunningAgent
         self.longRunningLoad = longRunningLoad
         self.completionStopReason = completionStopReason
+        self.toolResult = toolResult
     }
 
     func makeWorkspaceEnvironment(
@@ -1103,12 +1242,19 @@ private actor FakeAppDependencyFactory: AppDependencyFactory {
                 +new
                 """
             },
+            executeTool: { request, _, runtimeHooks in
+                try await self.executeFakeTool(root: root, request: request, runtimeHooks: runtimeHooks)
+            },
             runAgent: { task, _, _ in
                 let longRunning = self.longRunningAgent
                 let responseText = self.responseText
+                let toolResult = self.toolResult
                 await self.recordRun(task)
                 return AsyncThrowingStream { continuation in
                     continuation.yield(.toolStarted(.gitStatus))
+                    if let toolResult {
+                        continuation.yield(.toolFinished(toolResult))
+                    }
                     continuation.yield(.token(TokenChunk(text: responseText, index: 0, isFinal: false)))
                     continuation.yield(.token(TokenChunk(
                         text: "",
@@ -1158,6 +1304,24 @@ private actor FakeAppDependencyFactory: AppDependencyFactory {
 
     private func recordRun(_ task: AgentTask) {
         runTasks.append(task)
+    }
+
+    private func executeFakeTool(
+        root: URL,
+        request: ToolRequest,
+        runtimeHooks: ToolRuntimeHooks?
+    ) async throws -> ToolResult {
+        executedToolRequests.append(request)
+        if let toolResult {
+            return toolResult
+        }
+        let loop = try ToolExecutionLoop(
+            root: root,
+            policy: ToolExecutionPolicy(allowsWrites: true),
+            mutationRecorder: { _, _ in UUID().uuidString },
+            permissionAuthorizer: runtimeHooks?.permissionAuthorizer,
+            settlementHandlers: runtimeHooks?.settlementHandlers ?? .empty)
+        return try await loop.execute(request)
     }
 }
 

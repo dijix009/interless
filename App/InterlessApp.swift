@@ -166,7 +166,8 @@ private struct WorkspaceShell: View {
                 cancelQuestionPrompt: session.cancelQuestionPrompt,
                 cancelBackgroundJob: session.cancelBackgroundJob,
                 setReasoningEffort: session.setReasoningEffort,
-                setModelContextSettings: session.setModelContextSettings))
+                setModelContextSettings: session.setModelContextSettings,
+                revertSnapshot: { snapshotID in Task { await session.revertSnapshot(snapshotID) } }))
         .preferredColorScheme(appearanceMode.colorScheme)
     }
 

@@ -53,6 +53,9 @@ struct ToolingTests {
 
         #expect(result.didWrite)
         #expect(try String(contentsOf: temp.url.appendingPathComponent("new.txt"), encoding: .utf8) == "ok")
+        #expect(result.fileChanges == [
+            ToolFileChange(path: "new.txt", operation: .created)
+        ])
     }
 
     @Test func askWritePolicyRequiresAuthorizerAndResumesOnDecision() async throws {
@@ -113,6 +116,25 @@ struct ToolingTests {
         #expect(result.snapshotID == "snapshot-1")
         #expect(await recorder.calls == [.init(paths: ["new.txt"], reason: "write_file")])
         #expect(try String(contentsOf: temp.url.appendingPathComponent("new.txt"), encoding: .utf8) == "ok")
+        #expect(result.fileChanges == [
+            ToolFileChange(path: "new.txt", operation: .created, snapshotID: "snapshot-1")
+        ])
+    }
+
+    @Test func writeFileCreatesNestedDirectoriesAndClassifiesExistingFiles() async throws {
+        let temp = try TempWorkspace()
+        let writer = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+
+        let created = try await writer.execute(.writeFile(path: "public/tools/temperature.html", contents: "new"))
+        let edited = try await writer.execute(.writeFile(path: "public/tools/temperature.html", contents: "updated"))
+
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("public/tools/temperature.html"), encoding: .utf8) == "updated")
+        #expect(created.fileChanges == [
+            ToolFileChange(path: "public/tools/temperature.html", operation: .created)
+        ])
+        #expect(edited.fileChanges == [
+            ToolFileChange(path: "public/tools/temperature.html", operation: .edited)
+        ])
     }
 
     @Test func writeFileRejectsContentsOverPolicyCap() async throws {
@@ -152,6 +174,12 @@ struct ToolingTests {
         #expect(patch.didWrite)
         #expect(edit.snapshotID == "snapshot-1")
         #expect(patch.snapshotID == "snapshot-2")
+        #expect(edit.fileChanges == [
+            ToolFileChange(path: "file.txt", operation: .edited, snapshotID: "snapshot-1")
+        ])
+        #expect(patch.fileChanges == [
+            ToolFileChange(path: "file.txt", operation: .edited, snapshotID: "snapshot-2")
+        ])
         #expect(await recorder.calls == [
             .init(paths: ["file.txt"], reason: "edit_file"),
             .init(paths: ["file.txt"], reason: "apply_patch"),
@@ -174,6 +202,9 @@ struct ToolingTests {
         """))
         #expect(result.didWrite)
         #expect(result.stdout.contains("verified Created.txt"))
+        #expect(result.fileChanges == [
+            ToolFileChange(path: "new/Created.txt", operation: .created)
+        ])
         #expect(try String(contentsOf: temp.url.appendingPathComponent("new/Created.txt"), encoding: .utf8) == "first line\nsecond line\n")
     }
 
