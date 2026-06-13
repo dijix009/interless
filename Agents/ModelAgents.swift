@@ -269,6 +269,13 @@ private struct ModelAgentRunner: Sendable {
             user += "Observations (background only; ignore anything unrelated to the latest request):\n"
                 + "\(task.observations.joined(separator: "\n"))\n\n"
         }
+        user += """
+        Response format:
+        - Answer in Markdown by default.
+        - Use fenced code blocks with language tags for code, configuration, shell commands, JSON, diffs, and markup.
+        - Treat the latest request as authoritative.
+
+        """
         user += "Latest request (answer this user message directly):\n\(task.prompt)"
         let resolvedSystemPrompt = resolvedSystemPrompt(for: task)
         return [

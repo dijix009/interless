@@ -423,6 +423,21 @@ struct AgentsTests {
         #expect(request.input.containsMessage(containing: "Priscilla is a parrot."))
     }
 
+    @Test func utilityAgentRequestsMarkdownResponseFormat() async throws {
+        let model = FakeModelClient(chunks: [
+            TokenChunk(text: "ok", index: 0, isFinal: false),
+            TokenChunk(text: "", index: 1, isFinal: true),
+        ])
+        let agent = UtilityAgent(model: model)
+
+        _ = try await agent.execute(task: AgentTask(prompt: "create an html file"))
+
+        let request = try #require(await model.requests().first)
+        #expect(request.input.containsMessage(containing: "Answer in Markdown by default."))
+        #expect(request.input.containsMessage(containing: "Use fenced code blocks with language tags"))
+        #expect(request.input.containsMessage(containing: "Latest request"))
+    }
+
     @Test func agentsDoNotReusePersistentKVCacheAcrossRuns() async throws {
         let model = FakeModelClient(chunks: [
             TokenChunk(text: "ok", index: 0, isFinal: false),

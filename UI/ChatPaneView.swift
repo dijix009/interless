@@ -36,10 +36,11 @@ public struct ChatPaneView: View {
     public var onResolvePermission: @MainActor (PermissionPromptAction) -> Void
     public var onAnswerQuestion: @MainActor (String) -> Void
     public var onCancelQuestion: @MainActor () -> Void
+    public var onReviewChangedFiles: @MainActor () -> Void
+    public var onRevertSnapshot: @MainActor (String) -> Void
     @FocusState private var isDraftFocused: Bool
-    @State private var isModelPickerPresented = false
+    @State private var isModelPickerSheetPresented = false
     @State private var isReasoningPickerPresented = false
-    @State private var modelSearchQuery = ""
     private let bottomAnchorID = "chat-bottom-anchor"
 
     public init(
@@ -75,7 +76,9 @@ public struct ChatPaneView: View {
         onRemoveAttachment: @escaping @MainActor (UUID) -> Void = { _ in },
         onResolvePermission: @escaping @MainActor (PermissionPromptAction) -> Void = { _ in },
         onAnswerQuestion: @escaping @MainActor (String) -> Void = { _ in },
-        onCancelQuestion: @escaping @MainActor () -> Void = {}
+        onCancelQuestion: @escaping @MainActor () -> Void = {},
+        onReviewChangedFiles: @escaping @MainActor () -> Void = {},
+        onRevertSnapshot: @escaping @MainActor (String) -> Void = { _ in }
     ) {
         self.messages = messages
         self._draft = draft
@@ -110,6 +113,8 @@ public struct ChatPaneView: View {
         self.onResolvePermission = onResolvePermission
         self.onAnswerQuestion = onAnswerQuestion
         self.onCancelQuestion = onCancelQuestion
+        self.onReviewChangedFiles = onReviewChangedFiles
+        self.onRevertSnapshot = onRevertSnapshot
     }
 
     private var maxContentWidth: CGFloat {
@@ -183,6 +188,15 @@ public struct ChatPaneView: View {
             composer
         }
         .background(Theme.C.surface)
+        .sheet(isPresented: $isModelPickerSheetPresented) {
+            ComposerModelPickerSheet(
+                selectedModelID: modelName,
+                modelStatus: modelStatus,
+                availableModels: availableModels,
+                suggestedModels: suggestedDownloadModels,
+                onSelectModelID: onSelectModelID,
+                onOpenSettings: onSelectModel)
+        }
         .onChange(of: focusTarget) { _, newValue in
             if newValue == .chat {
                 isDraftFocused = true
@@ -312,7 +326,9 @@ public struct ChatPaneView: View {
 
     @ViewBuilder
     private func messageRow(_ message: ChatMessageViewState) -> some View {
-        if message.isToolEvent && message.isCollapsed {
+        if let summary = message.toolSummary {
+            changedFilesCard(summary)
+        } else if message.isToolEvent && message.isCollapsed {
             HStack(spacing: 6) {
                 Image(systemName: "wrench.and.screwdriver")
                 Text(message.text).lineLimit(1)
@@ -351,11 +367,15 @@ public struct ChatPaneView: View {
                 if message.role == .assistant {
                     assistantHeader(message)
                 }
-                Text(text)
-                    .font(.bodyS)
-                    .foregroundStyle(message.role == .error ? Theme.C.danger : Theme.C.textPrimary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if message.role == .assistant {
+                    MarkdownMessageView(text)
+                } else {
+                    Text(text)
+                        .font(.bodyS)
+                        .foregroundStyle(message.role == .error ? Theme.C.danger : Theme.C.textPrimary)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if message.isStreaming {
                     HStack(spacing: 6) {
                         Text("generating")
@@ -376,6 +396,82 @@ public struct ChatPaneView: View {
             reasoningEffort: message.reasoningEffort)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "…" : trimmed
+    }
+
+    private func changedFilesCard(_ summary: ChatToolSummaryViewState) -> some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: .space3) {
+                Image(systemName: "plus.app")
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Theme.C.textPrimary)
+                    .frame(width: 38, height: 38)
+                    .background(Theme.C.surface2, in: RoundedRectangle(cornerRadius: .radiusSm, style: .continuous))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(summary.title)
+                        .font(.bodyS.weight(.semibold))
+                        .foregroundStyle(Theme.C.textPrimary)
+                    if let subtitle = summary.subtitle {
+                        Text(subtitle)
+                            .font(.metaMono)
+                            .foregroundStyle(Theme.C.success)
+                    }
+                }
+                Spacer()
+                if summary.canUndo, let snapshotID = summary.snapshotID {
+                    Button("Undo") {
+                        onRevertSnapshot(snapshotID)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                if summary.canReview {
+                    Button("Review") {
+                        onReviewChangedFiles()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(.space3)
+
+            Divider().overlay(Theme.C.border)
+
+            VStack(spacing: 0) {
+                ForEach(summary.files) { file in
+                    changedFileRow(file)
+                }
+            }
+        }
+        .background(Theme.C.surface, in: RoundedRectangle(cornerRadius: .radius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: .radius, style: .continuous)
+                .stroke(Theme.C.border, lineWidth: 1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func changedFileRow(_ file: ChangedFileSummaryViewState) -> some View {
+        HStack(spacing: .space2) {
+            Text(file.operation == "created" ? "Created" : "Edited")
+                .font(.metaMono)
+                .foregroundStyle(file.operation == "created" ? Theme.C.success : Theme.C.caution)
+                .frame(width: 52, alignment: .leading)
+            Text(file.path)
+                .font(.bodyS)
+                .foregroundStyle(Theme.C.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            if let additions = file.additions, let deletions = file.deletions {
+                HStack(spacing: .space1) {
+                    Text("+\(additions)")
+                        .foregroundStyle(Theme.C.success)
+                    Text("-\(deletions)")
+                        .foregroundStyle(Theme.C.danger)
+                }
+                .font(.metaMono)
+            }
+        }
+        .padding(.horizontal, .space3)
+        .padding(.vertical, .space2)
     }
 
     /// Renders user-message body honoring the Markdown / plain-text preference.
@@ -1016,33 +1112,13 @@ public struct ChatPaneView: View {
         .buttonStyle(.plain)
     }
 
-    private var filteredAvailableModels: [String] {
-        let query = modelSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return availableModels }
-        return availableModels.filter {
-            $0.localizedCaseInsensitiveContains(query)
-                || displayName(for: $0).localizedCaseInsensitiveContains(query)
-        }
-    }
-
     private var suggestedDownloadModels: [String] {
-        ["mlx-community/gemma-2-2b-it-4bit"].filter { !availableModels.contains($0) }
-    }
-
-    private var pastedDownloadCandidate: String? {
-        let query = modelSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard query.contains("/"),
-              !availableModels.contains(query),
-              ModelCompatibility.isSupported(query) else {
-            return nil
-        }
-        return query
+        ComposerModelPickerModel.suggestedDownloadModelIDs.filter { !availableModels.contains($0) }
     }
 
     private var modelPickerButton: some View {
         Button {
-            modelSearchQuery = ""
-            isModelPickerPresented.toggle()
+            isModelPickerSheetPresented = true
         } label: {
             HStack(spacing: .space1) {
                 Text(shortModelName)
@@ -1055,141 +1131,9 @@ public struct ChatPaneView: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .fixedSize()
         .frame(maxWidth: 165)
-        .popover(isPresented: $isModelPickerPresented, arrowEdge: .bottom) {
-            modelPickerPopover
-        }
         .help("Select downloaded model")
-    }
-
-    private var modelPickerPopover: some View {
-        VStack(spacing: 0) {
-            TextField("Find model...", text: $modelSearchQuery)
-                .textFieldStyle(.plain)
-                .font(.bodyS.weight(.medium))
-                .padding(.horizontal, .space3)
-                .padding(.vertical, 14)
-
-            Divider()
-
-            if filteredAvailableModels.isEmpty && pastedDownloadCandidate == nil && suggestedDownloadModels.isEmpty {
-                VStack(alignment: .leading, spacing: .space1) {
-                    Text(availableModels.isEmpty ? "No downloaded models" : "No matching downloaded models")
-                        .font(.bodyS.weight(.semibold))
-                        .foregroundStyle(Theme.C.textSecondary)
-                    Text("Paste an MLX Hugging Face model ID to download and load it.")
-                        .font(.metaMono)
-                        .foregroundStyle(Theme.C.textTertiary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.space3)
-            } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(filteredAvailableModels, id: \.self) { id in
-                            modelPickerRow(id)
-                        }
-                        if let candidate = pastedDownloadCandidate {
-                            if !filteredAvailableModels.isEmpty {
-                                Divider()
-                            }
-                            modelDownloadRow(candidate)
-                        } else if !suggestedDownloadModels.isEmpty {
-                            if !filteredAvailableModels.isEmpty {
-                                Divider()
-                            }
-                            modelPickerSectionLabel("Download model")
-                            ForEach(suggestedDownloadModels, id: \.self) { id in
-                                modelDownloadRow(id)
-                            }
-                        }
-                    }
-                }
-                .frame(maxHeight: 320)
-            }
-        }
-        .frame(width: 360)
-        .background(.regularMaterial)
-        .presentationBackground(.regularMaterial)
-    }
-
-    private func modelPickerRow(_ id: String) -> some View {
-        Button {
-            selectModelFromPopover(id)
-        } label: {
-            HStack(spacing: .space2) {
-                Text(displayName(for: id))
-                    .font(.bodyS.weight(.semibold))
-                    .foregroundStyle(Theme.C.textPrimary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Spacer(minLength: .space3)
-                if id == modelName {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Theme.C.textSecondary)
-                }
-            }
-            .padding(.horizontal, .space3)
-            .frame(height: 46)
-            .background(id == modelName ? Color.primary.opacity(0.045) : Color.clear)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func modelDownloadRow(_ id: String) -> some View {
-        Button {
-            selectModelFromPopover(id)
-        } label: {
-            HStack(spacing: .space2) {
-                Image(systemName: "arrow.down.circle")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Theme.C.accent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(displayName(for: id))
-                        .font(.bodyS.weight(.semibold))
-                        .foregroundStyle(Theme.C.textPrimary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(id)
-                        .font(.metaMono)
-                        .foregroundStyle(Theme.C.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer(minLength: .space3)
-                Text("Download")
-                    .font(.metaMono)
-                    .foregroundStyle(Theme.C.accent)
-            }
-            .padding(.horizontal, .space3)
-            .frame(height: 54)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .help("Download and load \(id)")
-    }
-
-    @MainActor
-    private func selectModelFromPopover(_ id: String) {
-        isModelPickerPresented = false
-        modelSearchQuery = ""
-        DispatchQueue.main.async {
-            Task { @MainActor in
-                onSelectModelID(id)
-            }
-        }
-    }
-
-    private func modelPickerSectionLabel(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(.labelMono)
-            .foregroundStyle(Theme.C.textTertiary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, .space3)
-            .padding(.top, .space2)
-            .padding(.bottom, .space1)
     }
 
     private func displayName(for id: String) -> String {

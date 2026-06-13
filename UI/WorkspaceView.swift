@@ -48,6 +48,7 @@ public struct WorkspaceViewActions {
     public var cancelBackgroundJob: @MainActor (UUID) -> Void
     public var setReasoningEffort: @MainActor (ReasoningEffort) -> Void
     public var setModelContextSettings: @MainActor (ModelContextSettingsViewState) -> Void
+    public var revertSnapshot: @MainActor (String) -> Void
 
     public init(
         openWorkspace: @escaping @MainActor () -> Void,
@@ -90,7 +91,8 @@ public struct WorkspaceViewActions {
         cancelQuestionPrompt: @escaping @MainActor (UUID) -> Void = { _ in },
         cancelBackgroundJob: @escaping @MainActor (UUID) -> Void = { _ in },
         setReasoningEffort: @escaping @MainActor (ReasoningEffort) -> Void = { _ in },
-        setModelContextSettings: @escaping @MainActor (ModelContextSettingsViewState) -> Void = { _ in }
+        setModelContextSettings: @escaping @MainActor (ModelContextSettingsViewState) -> Void = { _ in },
+        revertSnapshot: @escaping @MainActor (String) -> Void = { _ in }
     ) {
         self.openWorkspace = openWorkspace
         self.reindex = reindex
@@ -133,6 +135,7 @@ public struct WorkspaceViewActions {
         self.cancelBackgroundJob = cancelBackgroundJob
         self.setReasoningEffort = setReasoningEffort
         self.setModelContextSettings = setModelContextSettings
+        self.revertSnapshot = revertSnapshot
     }
 }
 
@@ -325,7 +328,9 @@ public struct WorkspaceView: View {
                         onCancelQuestion: {
                             guard let prompt = state.questionPrompt else { return }
                             actions.cancelQuestionPrompt(prompt.id)
-                        })
+                        },
+                        onReviewChangedFiles: actions.loadCurrentDiffForReview,
+                        onRevertSnapshot: actions.revertSnapshot)
                         .frame(minWidth: 380, idealWidth: 560, maxWidth: .infinity)
                     if isInspectorVisible, selectedSidebarMode == .code {
                         WorkspaceInspectorView(
