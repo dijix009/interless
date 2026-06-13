@@ -69,8 +69,13 @@ public enum CodeModeFinalAnswerSanitizer {
             guard let range = text.range(of: marker, range: cursor..<text.endIndex) else { return nil }
             let lineStart = text[..<range.lowerBound].lastIndex(of: "\n").map { text.index(after: $0) } ?? text.startIndex
             let linePrefix = text[lineStart..<range.lowerBound]
-            if linePrefix.trimmingCharacters(in: .whitespaces).isEmpty {
-                let lineEnd = text[range.upperBound...].firstIndex(of: "\n").map { text.index(after: $0) } ?? range.upperBound
+            let newlineIndex = text[range.upperBound...].firstIndex(of: "\n")
+            let lineSuffix = text[range.upperBound..<(newlineIndex ?? text.endIndex)]
+            // Closing fence must be bare on its own line; a marker with an info
+            // string (an inner ```lang) is content, so nested fences don't truncate.
+            if linePrefix.trimmingCharacters(in: .whitespaces).isEmpty,
+               lineSuffix.trimmingCharacters(in: .whitespaces).isEmpty {
+                let lineEnd = newlineIndex.map { text.index(after: $0) } ?? range.upperBound
                 return range.lowerBound..<lineEnd
             }
             cursor = range.upperBound
