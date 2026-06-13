@@ -28,6 +28,8 @@ public struct WorkspaceEnvironment: Sendable {
     public var fileTree: @Sendable () async throws -> [FileTreeNode]
     public var gitStatus: @Sendable () async -> GitStatus
     public var gitDiff: @Sendable (_ path: String?) async throws -> String
+    public var revertSnapshot: @Sendable (_ snapshotID: String) async throws -> WorkspaceMutationRevertResult
+    public var executeTool: @Sendable (_ request: ToolRequest, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async throws -> ToolResult
     public var runAgent: @Sendable (_ task: AgentTask, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async -> AsyncThrowingStream<AgentEvent, Error>
     public var embedTexts: @Sendable (_ texts: [String]) async throws -> [EmbeddingVector]?
     public var loadModels: @Sendable (_ settings: ModelSettingsViewState, _ progressReporter: ModelLoadProgressReporter?) async throws -> Void
@@ -43,6 +45,12 @@ public struct WorkspaceEnvironment: Sendable {
         fileTree: @escaping @Sendable () async throws -> [FileTreeNode],
         gitStatus: @escaping @Sendable () async -> GitStatus,
         gitDiff: @escaping @Sendable (_ path: String?) async throws -> String,
+        revertSnapshot: @escaping @Sendable (_ snapshotID: String) async throws -> WorkspaceMutationRevertResult = { _ in
+            throw AppRuntimeError.workspaceNotOpen
+        },
+        executeTool: @escaping @Sendable (_ request: ToolRequest, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async throws -> ToolResult = { _, _, _ in
+            throw AppRuntimeError.workspaceNotOpen
+        },
         runAgent: @escaping @Sendable (_ task: AgentTask, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async -> AsyncThrowingStream<AgentEvent, Error>,
         embedTexts: @escaping @Sendable (_ texts: [String]) async throws -> [EmbeddingVector]? = { _ in nil },
         loadModels: @escaping @Sendable (_ settings: ModelSettingsViewState, _ progressReporter: ModelLoadProgressReporter?) async throws -> Void,
@@ -59,6 +67,8 @@ public struct WorkspaceEnvironment: Sendable {
         self.fileTree = fileTree
         self.gitStatus = gitStatus
         self.gitDiff = gitDiff
+        self.revertSnapshot = revertSnapshot
+        self.executeTool = executeTool
         self.runAgent = runAgent
         self.embedTexts = embedTexts
         self.loadModels = loadModels
@@ -167,6 +177,28 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
             },
             gitDiff: { path in
                 try await git.diff(root: root, path: path)
+            },
+            revertSnapshot: { snapshotID in
+                guard let id = UUID(uuidString: snapshotID) else {
+                    throw WorkspaceSnapshotError.snapshotNotFound(UUID())
+                }
+                return try await snapshotStore.revert(id)
+            },
+            executeTool: { request, currentSettings, runtimeHooks in
+                let budget = ResourceBudget.resolved(for: currentSettings.resourceProfile)
+                let runtime = RuntimeConfigMapper.resolve(
+                    config: config?.effective,
+                    settings: currentSettings,
+                    resourceBudget: budget)
+                let policy = runtime.toolPolicy
+                let loop = try ToolExecutionLoop(
+                    root: root,
+                    policy: policy,
+                    mutationRecorder: Self.mutationRecorder(snapshotStore: snapshotStore),
+                    managedOutputStore: ManagedToolOutputStore(maxBytesPerStream: policy.maxOutputBytes),
+                    permissionAuthorizer: runtimeHooks?.permissionAuthorizer,
+                    settlementHandlers: runtimeHooks?.settlementHandlers ?? .empty)
+                return try await loop.execute(request)
             },
             runAgent: { task, currentSettings, runtimeHooks in
                 let resolvedController = await controller.resolve()

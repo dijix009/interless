@@ -12,6 +12,7 @@ public enum ChatMessageRole: String, Sendable, Equatable, Codable, CaseIterable 
 public struct ChatMessageViewState: Identifiable, Sendable, Equatable, Codable {
     public var id: UUID
     public var role: ChatMessageRole
+    public var kind: String
     public var text: String
     public var isStreaming: Bool
     public var isCollapsed: Bool
@@ -20,10 +21,12 @@ public struct ChatMessageViewState: Identifiable, Sendable, Equatable, Codable {
     public var completionStopReason: String?
     public var modelID: String?
     public var reasoningEffort: ReasoningEffort?
+    public var toolSummary: ChatToolSummaryViewState?
 
     public init(
         id: UUID = UUID(),
         role: ChatMessageRole,
+        kind: String = "text",
         text: String,
         isStreaming: Bool = false,
         isCollapsed: Bool = false,
@@ -31,10 +34,12 @@ public struct ChatMessageViewState: Identifiable, Sendable, Equatable, Codable {
         tokensPerSecond: Double? = nil,
         completionStopReason: String? = nil,
         modelID: String? = nil,
-        reasoningEffort: ReasoningEffort? = nil
+        reasoningEffort: ReasoningEffort? = nil,
+        toolSummary: ChatToolSummaryViewState? = nil
     ) {
         self.id = id
         self.role = role
+        self.kind = kind
         self.text = text
         self.isStreaming = isStreaming
         self.isCollapsed = isCollapsed
@@ -43,6 +48,7 @@ public struct ChatMessageViewState: Identifiable, Sendable, Equatable, Codable {
         self.completionStopReason = completionStopReason
         self.modelID = modelID
         self.reasoningEffort = reasoningEffort
+        self.toolSummary = toolSummary
     }
 
     public var isToolEvent: Bool {
@@ -50,7 +56,8 @@ public struct ChatMessageViewState: Identifiable, Sendable, Equatable, Codable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, role, text, isStreaming, isCollapsed, timestamp, tokensPerSecond, completionStopReason, modelID, reasoningEffort
+        case id, role, kind, text, isStreaming, isCollapsed, timestamp, tokensPerSecond
+        case completionStopReason, modelID, reasoningEffort, toolSummary
     }
 
     // Backward-compatible: persisted history without a timestamp still decodes.
@@ -58,6 +65,7 @@ public struct ChatMessageViewState: Identifiable, Sendable, Equatable, Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(UUID.self, forKey: .id)
         role = try c.decode(ChatMessageRole.self, forKey: .role)
+        kind = try c.decodeIfPresent(String.self, forKey: .kind) ?? "text"
         text = try c.decode(String.self, forKey: .text)
         isStreaming = try c.decodeIfPresent(Bool.self, forKey: .isStreaming) ?? false
         isCollapsed = try c.decodeIfPresent(Bool.self, forKey: .isCollapsed) ?? false
@@ -66,6 +74,52 @@ public struct ChatMessageViewState: Identifiable, Sendable, Equatable, Codable {
         completionStopReason = try c.decodeIfPresent(String.self, forKey: .completionStopReason)
         modelID = try c.decodeIfPresent(String.self, forKey: .modelID)
         reasoningEffort = try c.decodeIfPresent(ReasoningEffort.self, forKey: .reasoningEffort)
+        toolSummary = try c.decodeIfPresent(ChatToolSummaryViewState.self, forKey: .toolSummary)
+    }
+}
+
+public struct ChangedFileSummaryViewState: Identifiable, Sendable, Equatable, Codable {
+    public var id: String { path }
+    public var path: String
+    public var operation: String
+    public var additions: Int?
+    public var deletions: Int?
+
+    public init(
+        path: String,
+        operation: String,
+        additions: Int? = nil,
+        deletions: Int? = nil
+    ) {
+        self.path = path
+        self.operation = operation
+        self.additions = additions
+        self.deletions = deletions
+    }
+}
+
+public struct ChatToolSummaryViewState: Sendable, Equatable, Codable {
+    public var title: String
+    public var subtitle: String?
+    public var files: [ChangedFileSummaryViewState]
+    public var snapshotID: String?
+    public var canReview: Bool
+    public var canUndo: Bool
+
+    public init(
+        title: String,
+        subtitle: String? = nil,
+        files: [ChangedFileSummaryViewState],
+        snapshotID: String? = nil,
+        canReview: Bool = true,
+        canUndo: Bool = false
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.files = files
+        self.snapshotID = snapshotID
+        self.canReview = canReview
+        self.canUndo = canUndo
     }
 }
 
