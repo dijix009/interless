@@ -80,7 +80,11 @@ public actor MLXBackend: InferenceBackend {
         }
         let log = self.log
         if role == .embeddings {
-            let configuration: ModelConfiguration = id == "nomic_text_v1_5"
+            // The tuned nomic config keyed off a literal that never matched the
+            // catalog/UI id (`nomic-ai/nomic-embed-text-v1.5`); accept both so the
+            // optimized pooling/normalization path is actually used.
+            let isNomic = id == "nomic_text_v1_5" || id == "nomic-ai/nomic-embed-text-v1.5"
+            let configuration: ModelConfiguration = isNomic
                 ? EmbedderRegistry.nomic_text_v1_5
                 : ModelConfiguration(id: id)
             let container = try await MLX.withError {

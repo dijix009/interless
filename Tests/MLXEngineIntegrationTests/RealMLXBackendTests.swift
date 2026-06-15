@@ -60,6 +60,29 @@ struct RealMLXBackendTests {
         #expect(!textB.isEmpty)
     }
 
+    /// Exercises the post-overhaul engine tuning on the real backend: the
+    /// `smallRAM` profile resolves to a `.quantized` KV policy (4-bit from token 0,
+    /// `maxKVSize = nil` so MLX uses a quantizable `KVCacheSimple`), injected per
+    /// request by `InferenceController.capped`. Confirms that real param-mapping
+    /// path streams valid tokens and honors the (profile-capped) `maxTokens`.
+    @Test(.timeLimit(.minutes(10)))
+    func smallRAMProfileQuantizedKVGenerationStreamsAndHonorsMaxTokens() async throws {
+        let controller = await EngineBootstrap.liveController(resourceProfile: .smallRAM)
+        try await controller.loadModel(id: ModelFixtures.tinyUtility, role: .utility, quantization: .q4)
+
+        var chunks: [TokenChunk] = []
+        let stream = await controller.generate(
+            request: .prompt("List two fruits.", role: .utility, maxTokens: 32))
+        for try await chunk in stream { chunks.append(chunk) }
+
+        #expect(chunks.contains { !$0.text.isEmpty })
+        #expect(chunks.map(\.index) == Array(0..<chunks.count))
+        #expect(chunks.last?.isFinal == true)
+        if let info = chunks.compactMap(\.info).last {
+            #expect(info.generationTokenCount <= 32) // capped by maxTokens (or EOS earlier)
+        }
+    }
+
     private func collectText(_ stream: AsyncThrowingStream<TokenChunk, Error>) async throws -> String {
         var text = ""
         for try await chunk in stream { text += chunk.text }

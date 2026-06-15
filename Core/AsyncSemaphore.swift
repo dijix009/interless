@@ -55,6 +55,16 @@ public final class AsyncSemaphore: @unchecked Sendable {
                 waiters.append(Waiter(id: id, continuation: continuation))
                 lock.unlock()
             }
+            // Reached only when a permit was granted (success resume). If the task
+            // was cancelled in the race between `signal()` removing this waiter and
+            // `onCancel` running, `signal()` may have handed us the permit anyway —
+            // return it and throw, so a cancelled task never silently holds a permit
+            // (which would deadlock the gate for callers that don't arm `signal()`
+            // before their first cancellation check).
+            if Task.isCancelled {
+                signal()
+                throw CancellationError()
+            }
         } onCancel: {
             lock.lock()
             if let index = waiters.firstIndex(where: { $0.id == id }) {

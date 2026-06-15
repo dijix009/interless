@@ -2670,6 +2670,9 @@ public final class WorkspaceSessionModel {
             setCurrentSession(session)
             let parts = try await sessionStore.messageParts(sessionID: session.id, limit: 500)
             chatMessages = parts.compactMap(Self.chatMessageViewState)
+            // Restoring up to 500 parts can exceed the retained-transcript budget;
+            // trim now rather than waiting for the next append to do it.
+            trimChatTranscript()
             await refreshSessionRuntimeState(sessionID: session.id)
         } catch {
             appendNotice(severity: .warning, title: "Chat unavailable", message: String(describing: error))

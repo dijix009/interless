@@ -1,9 +1,16 @@
 # Interless — Performance, RAM & Coding-Quality Audit
 
+> **Status (shipped):** the Tier-0/1/2 perf+RAM items and the coding-quality workstream
+> (token-fitting, todos, abstractive compaction, repo-map retrieval, act→verify, patch
+> creation) landed via PRs #6, #7, #9 and the `chore/hardening-and-validation` branch
+> (semaphore/unload/restore/embedder-id/watcher hardening). Remaining future work: the full
+> edit→verify→**fix** loop, patch delete/rename + fuzzy hunks, snippet region expansion,
+> `SessionRunner.drain` context, per-surface host views, KV prefix-reuse. This document is
+> kept as the original audit record; line numbers are from the audited revision and drift.
+
 Goal lens: **minimal RAM while delivering powerful local coding/chat — useful on an
 8 GB Mac, scaling up.** Findings below are ranked by leverage toward that goal, not by
-file. Each item has a concrete location and fix. Line numbers are from the audited
-revision and may drift.
+file. Each item has a concrete location and fix.
 
 Severity: 🔴 critical · 🟠 high · 🟡 medium · ⚪ low.
 

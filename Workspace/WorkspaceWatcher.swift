@@ -9,7 +9,7 @@ public actor WorkspaceWatcher {
     private let debounce: Duration
     private let ignoredEventPathComponents: Set<String>
     private var pending: [WorkspaceEvent] = []
-    private var scheduled = false
+    private var inFlight = false
 
     public init(
         root: URL,
@@ -49,23 +49,29 @@ public actor WorkspaceWatcher {
         continuation: AsyncStream<IndexingProgress>.Continuation
     ) {
         pending.append(contentsOf: events)
-        guard !scheduled else { return }
-        scheduled = true
-        Task {
+        // A single drain loop runs at a time. Events arriving while a reindex is
+        // in flight just append to `pending`; the loop picks them up in its next
+        // (debounce-coalesced) iteration — no overlapping scheduled tasks, so a
+        // burst (git checkout, build output) can't spawn a storm of reindexes.
+        guard !inFlight else { return }
+        inFlight = true
+        Task { await drain(continuation: continuation) }
+    }
+
+    private func drain(continuation: AsyncStream<IndexingProgress>.Continuation) async {
+        while true {
             try? await Task.sleep(for: debounce)
-            let batch = takePending()
+            let batch = pending
+            pending.removeAll(keepingCapacity: true)
+            guard !batch.isEmpty else {
+                inFlight = false
+                return
+            }
             let stream = await indexer.reindex(events: batch)
             for await progress in stream {
                 continuation.yield(progress)
             }
         }
-    }
-
-    private func takePending() -> [WorkspaceEvent] {
-        let batch = pending
-        pending.removeAll(keepingCapacity: true)
-        scheduled = false
-        return batch
     }
 
     private static func isIgnoredGeneratedEvent(
