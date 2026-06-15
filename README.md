@@ -267,8 +267,16 @@ answer-token setting or choose Reasoning: None.
 - Central permission policy with allow, ask, and deny effects.
 - Interactive ask prompts for write/process permissions.
 - Bounded managed tool output storage.
-- Stale tool-call rejection.
-- Todo, question, and task settlements surfaced through native UI state.
+- Stale tool-call rejection (the schema generation advertised to the model is enforced).
+- Todo, question, and task settlements surfaced through native UI state. Open todos are
+  re-injected into each turn so the agent tracks its own plan across turns.
+- Conversation compaction uses an abstractive model-written summary (falling back to an
+  extractive slice when no model is loaded), consulted in both simple and smart modes.
+- `apply_patch` applies multi-file unified diffs and can create new files; `write_file`/
+  `edit_file`/`apply_patch` append a post-write re-read verification of what landed on disk.
+- Code mode can save a model's generated file when the model emits a code block instead of
+  calling a tool — only with an explicit/inferred path and only when writes are allowed,
+  routed through the same containment + snapshot + permission guards as the write tools.
 
 ### Git And Review
 
@@ -557,9 +565,12 @@ persisted/displayed answer.
 
 ### The context meter looks approximate
 
-The context meter estimates prompt/session/workspace context usage before MLX
-tokenization. It is useful as a pressure indicator, but exact token counts depend
-on the selected model tokenizer.
+The composer's context meter is a fast estimate (~3.3 characters/token) shown as a
+pressure indicator. It is intentionally approximate — the *enforced* budget is the
+tokenizer-exact context fitting applied to every turn before generation, which pins the
+system prompt and latest request, degrades older tool output, and emits a "context
+compacted" card rather than letting the prompt overflow. So the meter can read a little
+high or low without affecting what the model actually receives.
 
 ### A model ID is hidden or rejected
 
