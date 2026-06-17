@@ -27,6 +27,7 @@ public enum ToolRequest: Sendable, Equatable, Codable {
     case todo(items: [ToolTodoItem])
     case task(prompt: String)
     case question(prompt: String, options: [String] = [])
+    case recall(query: String, limit: Int = 5)
     case gitStatus
     case gitDiff(path: String?)
     case runTests(arguments: [String] = [])
@@ -43,6 +44,7 @@ public enum ToolRequest: Sendable, Equatable, Codable {
         case .todo: return "todo"
         case .task: return "task"
         case .question: return "question"
+        case .recall: return "recall"
         case .gitStatus: return "gitStatus"
         case .gitDiff: return "gitDiff"
         case .runTests: return "runTests"
@@ -364,15 +366,20 @@ public struct ToolSettlementHandlers: Sendable {
     public var updateTodos: (@Sendable ([ToolTodoItem]) async throws -> String)?
     public var askQuestion: (@Sendable (ToolQuestionRequest) async throws -> ToolQuestionResponse)?
     public var scheduleTask: (@Sendable (String) async throws -> ToolTaskSettlement)?
+    /// Recall earlier conversation by semantic query over the whole session; returns
+    /// formatted matching turns (or an empty-result note). Wired by the app layer.
+    public var recallHistory: (@Sendable (_ query: String, _ limit: Int) async -> String)?
 
     public init(
         updateTodos: (@Sendable ([ToolTodoItem]) async throws -> String)? = nil,
         askQuestion: (@Sendable (ToolQuestionRequest) async throws -> ToolQuestionResponse)? = nil,
-        scheduleTask: (@Sendable (String) async throws -> ToolTaskSettlement)? = nil
+        scheduleTask: (@Sendable (String) async throws -> ToolTaskSettlement)? = nil,
+        recallHistory: (@Sendable (_ query: String, _ limit: Int) async -> String)? = nil
     ) {
         self.updateTodos = updateTodos
         self.askQuestion = askQuestion
         self.scheduleTask = scheduleTask
+        self.recallHistory = recallHistory
     }
 
     public static let empty = ToolSettlementHandlers()

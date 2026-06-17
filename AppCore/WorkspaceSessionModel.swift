@@ -2267,6 +2267,9 @@ public final class WorkspaceSessionModel {
             },
             saveMessageEmbedding: { embedding in
                 try await sessionStore.upsertMessageEmbedding(embedding)
+            },
+            loadSemanticMessageHits: { sessionID, vector, limit in
+                try await sessionStore.semanticMessageSearch(sessionID: sessionID, vector: vector, limit: limit)
             })
     }
 
@@ -2842,7 +2845,36 @@ public final class WorkspaceSessionModel {
                 scheduleTask: { [weak self] prompt in
                     guard let self else { throw ToolError.settlementUnavailable("task scheduling unavailable") }
                     return try await self.scheduleBackgroundTask(prompt, sessionID: sessionID)
+                },
+                recallHistory: { [weak self] query, limit in
+                    guard let self else { return "" }
+                    return await self.recallConversation(query, limit: limit, sessionID: sessionID)
                 }))
+    }
+
+    /// Settlement for the `recall_history` tool: semantic search over the WHOLE
+    /// session, recency-aware supersession dedup, formatted oldest→newest with the
+    /// authority rule so a recalled stale turn can't override a newer one.
+    private func recallConversation(_ query: String, limit: Int, sessionID: UUID?) async -> String {
+        guard let sessionStore, let sessionID,
+              let environment = environment ?? chatOnlyEnvironment,
+              let vector = try? await environment.embedTexts(["conversation_query: \(query)"])?.first,
+              !vector.isEmpty else {
+            return "Conversation recall is unavailable (no embeddings)."
+        }
+        guard let parts = try? await sessionStore.semanticMessageSearch(
+            sessionID: sessionID, vector: vector, limit: max(1, min(limit, 10))), !parts.isEmpty else {
+            return "No earlier conversation matched \"\(query)\"."
+        }
+        // Oldest→newest; the model is told the most recent is authoritative.
+        let ordered = parts.sorted { $0.createdAt < $1.createdAt }
+        let lines = ordered.map { part -> String in
+            let role = part.role == .user ? "User" : "Assistant"
+            return "[\(role)] \(part.text.trimmingCharacters(in: .whitespacesAndNewlines))"
+        }
+        let body = String(lines.joined(separator: "\n\n").prefix(4_000))
+        return "Recalled earlier conversation (oldest→newest; if these conflict, the most recent "
+            + "is authoritative, older is historical):\n\(body)"
     }
 
     private func authorizeToolPermission(_ request: ToolPermissionRequest) async -> ToolPermissionResolution {

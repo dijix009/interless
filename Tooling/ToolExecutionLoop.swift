@@ -111,6 +111,13 @@ public actor ToolExecutionLoop {
             let response = try await askQuestion(ToolQuestionRequest(prompt: prompt, options: options))
             return await manage(ToolResult(request: request, stdout: response.answer))
 
+        case let .recall(query, limit):
+            guard let recallHistory = settlementHandlers.recallHistory else {
+                throw ToolError.settlementUnavailable("conversation recall unavailable")
+            }
+            let output = await recallHistory(query, max(1, min(limit, 10)))
+            return await manage(ToolResult(request: request, stdout: output))
+
         case .gitStatus:
             return await manage(try await run(command: ["git", "status", "--short"], request: request))
 

@@ -331,7 +331,13 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                 permissionAuthorizer: runtimeHooks?.permissionAuthorizer,
                 settlementHandlers: runtimeHooks?.settlementHandlers ?? .empty))
             : nil
-        let registry = WorkspaceToolRegistry(policy: policy, advertisesTools: advertisesTools)
+        // Advertise recall_history only in workspace context with an embeddings model
+        // loaded — otherwise there are no message embeddings to search and the tool
+        // would always return empty.
+        let embeddingsLoaded = await controller.loadedRoles.contains(.embeddings)
+        let advertisesRecall = includesWorkspaceContext && embeddingsLoaded
+        let registry = WorkspaceToolRegistry(
+            policy: policy, advertisesTools: advertisesTools, advertisesRecall: advertisesRecall)
         let loopPolicy = AgentLoopPolicy(maxToolIterations: runtimeSettings.maxToolIterations)
         let contextBuilder = ContextBuilder(
             searchProvider: includesWorkspaceContext ? WorkspaceIndexSearchProvider(store: store) : nil,

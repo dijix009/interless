@@ -251,6 +251,9 @@ public protocol SessionRuntimeStore: Sendable {
     func upsertMessageEmbedding(_ embedding: SessionMessageEmbedding) async throws
     func messageEmbeddings(sessionID: UUID, limit: Int) async throws -> [SessionMessageEmbedding]
     func messageEmbedding(partID: UUID) async throws -> SessionMessageEmbedding?
+    /// Top-`limit` message parts of the session by similarity to `vector`, over the
+    /// entire session (no recent cap). Best (most similar) first.
+    func semanticMessageSearch(sessionID: UUID, vector: EmbeddingVector, limit: Int) async throws -> [SessionMessagePart]
     func replaceTodos(_ todos: [SessionTodo], sessionID: UUID) async throws
     func todos(sessionID: UUID) async throws -> [SessionTodo]
     func saveCompaction(_ checkpoint: SessionCompactionCheckpoint) async throws
@@ -258,6 +261,12 @@ public protocol SessionRuntimeStore: Sendable {
     func appendEvent(_ event: SessionEvent) async throws -> SessionEvent
     func events(sessionID: UUID, after cursor: SessionEventCursor?, limit: Int) async throws -> [SessionEvent]
     func interrupt(sessionID: UUID) async throws
+}
+
+public extension SessionRuntimeStore {
+    /// Default: no semantic recall (stores without message embeddings). The GRDB
+    /// store overrides this with a real bounded top-k over the session.
+    func semanticMessageSearch(sessionID: UUID, vector: EmbeddingVector, limit: Int) async throws -> [SessionMessagePart] { [] }
 }
 
 public actor SessionEventLog {
