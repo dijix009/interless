@@ -220,6 +220,40 @@ public final class GRDBSessionStore: SessionRuntimeStore {
         }
     }
 
+    /// Top-`limit` message parts of the session by cosine similarity to `vector`,
+    /// over the ENTIRE session (no recent-N cap). Streams rows with a cursor and a
+    /// bounded heap so peak memory is O(limit), and dot-products the stored BLOB
+    /// directly (vectors are normalized on write, so dot == cosine). Returned best
+    /// (most similar) first.
+    public func semanticMessageSearch(
+        sessionID: UUID,
+        vector: EmbeddingVector,
+        limit: Int
+    ) async throws -> [SessionMessagePart] {
+        guard !vector.isEmpty, limit > 0 else { return [] }
+        let query = vector.values
+        return try await dbWriter.read { db in
+            let cursor = try Row.fetchCursor(db, sql: """
+                SELECT p.*, e.vector AS embVector
+                FROM session_message_embedding e
+                JOIN session_message_part p ON p.id = e.partID
+                WHERE e.sessionID = ?
+                """, arguments: [sessionID.uuidString])
+            // Descending by similarity; worst kept last so it can be dropped.
+            var top: [(score: Double, part: SessionMessagePart)] = []
+            top.reserveCapacity(limit + 1)
+            while let row = try cursor.next() {
+                let data: Data = row["embVector"]
+                guard let similarity = Self.dotProduct(data, query),
+                      let part = Self.messagePart(row) else { continue }
+                if top.count >= limit, let worst = top.last, similarity <= worst.score { continue }
+                Self.insertByScoreDescending(&top, (similarity, part))
+                if top.count > limit { top.removeLast() }
+            }
+            return top.map(\.part)
+        }
+    }
+
     public func replaceTodos(_ todos: [SessionTodo], sessionID: UUID) async throws {
         try await dbWriter.write { db in
             try db.execute(sql: "DELETE FROM session_todo WHERE sessionID = ?", arguments: [sessionID.uuidString])
@@ -509,5 +543,33 @@ public final class GRDBSessionStore: SessionRuntimeStore {
             guard let base = buffer.bindMemory(to: Float.self).baseAddress else { return [] }
             return Array(UnsafeBufferPointer(start: base, count: count))
         }
+    }
+
+    /// Dot product of a stored (normalized) Float BLOB with the normalized query,
+    /// without materializing a `[Float]` per row. nil on dimension mismatch.
+    private static func dotProduct(_ data: Data, _ query: [Float]) -> Double? {
+        let count = data.count / MemoryLayout<Float>.stride
+        guard count == query.count, count > 0 else { return nil }
+        let sum: Float = data.withUnsafeBytes { raw in
+            let stored = raw.bindMemory(to: Float.self)
+            var acc: Float = 0
+            for index in 0..<count { acc += stored[index] * query[index] }
+            return acc
+        }
+        return Double(sum)
+    }
+
+    /// Insert into an array kept sorted by `score` descending (binary search).
+    private static func insertByScoreDescending(
+        _ array: inout [(score: Double, part: SessionMessagePart)],
+        _ element: (score: Double, part: SessionMessagePart)
+    ) {
+        var low = 0
+        var high = array.count
+        while low < high {
+            let mid = (low + high) / 2
+            if array[mid].score > element.score { low = mid + 1 } else { high = mid }
+        }
+        array.insert(element, at: low)
     }
 }

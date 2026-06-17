@@ -255,6 +255,26 @@ struct ToolingTests {
         #expect(task.stdout.contains("Summarize"))
     }
 
+    @Test func recallHistoryUsesSettlementHandlerAndFallsBackWhenUnwired() async throws {
+        let temp = try TempWorkspace()
+        let loop = try ToolExecutionLoop(
+            root: temp.url,
+            settlementHandlers: ToolSettlementHandlers(
+                recallHistory: { query, limit in
+                    "recalled \(limit) for \(query)"
+                }))
+        let result = try await loop.execute(.recall(query: "auth tokens", limit: 3))
+        #expect(result.stdout == "recalled 3 for auth tokens")
+        // limit is clamped to 1...10 by the loop
+        let clamped = try await loop.execute(.recall(query: "x", limit: 99))
+        #expect(clamped.stdout == "recalled 10 for x")
+
+        let bare = try ToolExecutionLoop(root: temp.url)
+        await #expect(throws: ToolError.settlementUnavailable("conversation recall unavailable")) {
+            _ = try await bare.execute(.recall(query: "x", limit: 5))
+        }
+    }
+
     @Test func questionAndTaskHaveDeterministicNoUIFallbacks() async throws {
         let temp = try TempWorkspace()
         let loop = try ToolExecutionLoop(root: temp.url)

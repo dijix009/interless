@@ -4,11 +4,15 @@ import Shared
 public struct WorkspaceToolRegistry: Sendable, Equatable {
     public var policy: ToolExecutionPolicy
     public var advertisesTools: Bool
+    /// Whether to advertise `recall_history` — only when a session store with
+    /// message embeddings is available (else the tool would always return empty).
+    public var advertisesRecall: Bool
     public var generation: Int
 
-    public init(policy: ToolExecutionPolicy = .default, advertisesTools: Bool = true, generation: Int = 1) {
+    public init(policy: ToolExecutionPolicy = .default, advertisesTools: Bool = true, advertisesRecall: Bool = false, generation: Int = 1) {
         self.policy = policy
         self.advertisesTools = advertisesTools
+        self.advertisesRecall = advertisesRecall
         self.generation = generation
     }
 
@@ -76,6 +80,11 @@ public struct WorkspaceToolRegistry: Sendable, Equatable {
             .question(
                 prompt: try requiredString("prompt", in: call),
                 options: try optionalStringArray("options", in: call) ?? [])
+        }
+        include(recallHistoryDefinition, scope: .session, advertised: advertisesRecall) { call in
+            .recall(
+                query: try requiredString("query", in: call),
+                limit: try optionalInt("limit", in: call) ?? 5)
         }
         include(gitStatusDefinition, scope: .workspace) { _ in .gitStatus }
         include(gitDiffDefinition, scope: .workspace) { call in
@@ -260,6 +269,19 @@ private let questionDefinition = ToolDefinition(
                 description: "Optional short answer choices."),
         ],
         required: ["prompt"]))
+
+private let recallHistoryDefinition = ToolDefinition(
+    name: "recall_history",
+    description: "Search the FULL earlier conversation (beyond what's already in context) for "
+        + "messages relevant to a topic, and get the matching turns back. Use when you need a "
+        + "detail, decision, or value from earlier that you don't currently see. If results "
+        + "conflict, the most recent is authoritative.",
+    parameters: objectSchema(
+        properties: [
+            "query": stringSchema("What to look for in earlier conversation."),
+            "limit": integerSchema("Optional max number of past turns to return (default 5, max 10)."),
+        ],
+        required: ["query"]))
 
 private let gitStatusDefinition = ToolDefinition(
     name: "git_status",

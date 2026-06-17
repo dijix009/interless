@@ -5,6 +5,31 @@ import Persistence
 import Shared
 
 struct SessionStoreTests {
+    @Test func semanticMessageSearchRanksOverFullHistoryNotJustRecent() async throws {
+        let store = try PersistenceBootstrap.inMemorySessionStore()
+        let session = try await store.createSession(id: nil, workspacePath: nil, title: "S")
+
+        // An OLD, highly-relevant turn (early createdAt) plus newer unrelated turns.
+        func add(_ text: String, _ vec: [Float], createdAt: Double) async throws -> UUID {
+            let id = UUID()
+            try await store.appendMessagePart(SessionMessagePart(
+                id: id, sessionID: session.id, messageID: UUID(), role: .user,
+                text: text, createdAt: Date(timeIntervalSince1970: createdAt)))
+            try await store.upsertMessageEmbedding(SessionMessageEmbedding(
+                sessionID: session.id, partID: id, vector: EmbeddingVector(vec)))
+            return id
+        }
+        let oldRelevant = try await add("the auth token format we chose", [1, 0, 0], createdAt: 1)
+        _ = try await add("unrelated chatter about lunch", [0, 1, 0], createdAt: 100)
+        _ = try await add("more unrelated weather talk", [0, 0, 1], createdAt: 101)
+
+        // Query close to the OLD turn; top-1 must be it despite being the oldest.
+        let hits = try await store.semanticMessageSearch(
+            sessionID: session.id, vector: EmbeddingVector([1, 0, 0]), limit: 2)
+        #expect(hits.first?.id == oldRelevant)
+        #expect(hits.count == 2) // bounded to limit
+    }
+
     @Test func sessionStoreAdmitsInputsIdempotentlyAndReplaysEvents() async throws {
         let store = try PersistenceBootstrap.inMemorySessionStore()
         let session = try await store.createSession(id: UUID(), workspacePath: "/tmp/work", title: "Plan")
