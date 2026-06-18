@@ -110,6 +110,16 @@ public struct AgentCatalog: Sendable, Equatable {
             system: "Maintain concise task todos from the current session state.",
             mode: .subagent,
             hidden: true)
-        return Dictionary(uniqueKeysWithValues: [build, plan, general, title, todo].map { ($0.id, $0) })
+        let explore = AgentDefinition(
+            id: "explore",
+            description: "Read-only exploration sub-agent.",
+            system: "You are the explore sub-agent. Investigate the workspace to answer the request — locate code, trace usage, and explain how pieces fit together using read-only tools (read_file, grep, glob, git). You cannot modify files. Return a concise, specific summary with file:line references that the calling agent can act on.",
+            mode: .subagent)
+        let review = AgentDefinition(
+            id: "review",
+            description: "Read-only code review sub-agent.",
+            system: "You are the review sub-agent. Review the described code or change for correctness, edge cases, and clarity using read-only tools. You cannot modify files. Return a concise, prioritized list of concrete findings with file:line references.",
+            mode: .subagent)
+        return Dictionary(uniqueKeysWithValues: [build, plan, general, title, todo, explore, review].map { ($0.id, $0) })
     }()
 }

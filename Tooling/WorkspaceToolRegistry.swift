@@ -7,12 +7,16 @@ public struct WorkspaceToolRegistry: Sendable, Equatable {
     /// Whether to advertise `recall_history` — only when a session store with
     /// message embeddings is available (else the tool would always return empty).
     public var advertisesRecall: Bool
+    /// Whether to advertise the `task` sub-agent tool. False for sub-agents
+    /// themselves so a read-only sub-agent cannot spawn another (no recursion).
+    public var advertisesSubagent: Bool
     public var generation: Int
 
-    public init(policy: ToolExecutionPolicy = .default, advertisesTools: Bool = true, advertisesRecall: Bool = false, generation: Int = 1) {
+    public init(policy: ToolExecutionPolicy = .default, advertisesTools: Bool = true, advertisesRecall: Bool = false, advertisesSubagent: Bool = true, generation: Int = 1) {
         self.policy = policy
         self.advertisesTools = advertisesTools
         self.advertisesRecall = advertisesRecall
+        self.advertisesSubagent = advertisesSubagent
         self.generation = generation
     }
 
@@ -73,8 +77,10 @@ public struct WorkspaceToolRegistry: Sendable, Equatable {
         include(todoDefinition, scope: .session) { call in
             .todo(items: try requiredTodoItems("items", in: call))
         }
-        include(taskDefinition, scope: .agent) { call in
-            .task(prompt: try requiredString("prompt", in: call))
+        include(taskDefinition, scope: .agent, advertised: advertisesSubagent) { call in
+            .task(
+                prompt: try requiredString("prompt", in: call),
+                agent: try optionalString("agent", in: call))
         }
         include(questionDefinition, scope: .session) { call in
             .question(
@@ -253,9 +259,12 @@ private let todoDefinition = ToolDefinition(
 
 private let taskDefinition = ToolDefinition(
     name: "task",
-    description: "Request that a bounded native subtask be scheduled by the agent runtime.",
+    description: "Delegate a focused sub-task to a read-only sub-agent that investigates the workspace in its own context and returns a concise summary. Use `explore` to locate/understand code and `review` to critique a change; the sub-agent cannot modify files. Prefer this for open-ended search or review so your own context stays lean — then act on the summary yourself.",
     parameters: objectSchema(
-        properties: ["prompt": stringSchema("Subtask prompt.")],
+        properties: [
+            "prompt": stringSchema("What the sub-agent should investigate or review."),
+            "agent": stringSchema("Sub-agent type: 'explore' (default) or 'review'."),
+        ],
         required: ["prompt"]))
 
 private let questionDefinition = ToolDefinition(
