@@ -62,9 +62,10 @@ public actor ToolExecutionLoop {
                 at: url.deletingLastPathComponent(),
                 withIntermediateDirectories: true)
             try contents.write(to: url, atomically: true, encoding: .utf8)
+            let verification = Self.verifiedSummary(url: url).map { "\n" + $0 } ?? ""
             return await manage(ToolResult(
                 request: request,
-                stdout: path,
+                stdout: path + verification,
                 didWrite: true,
                 snapshotID: snapshotID,
                 fileChanges: [ToolFileChange(path: relativePath, operation: operation, snapshotID: snapshotID)]))
@@ -221,10 +222,29 @@ public actor ToolExecutionLoop {
         }
         let url = try resolve(path: path, mustExist: true)
         let contents = try String(contentsOf: url, encoding: .utf8)
-        guard contents.contains(old) else { throw ToolError.editTargetNotFound(path: path) }
-        let updated = replaceAll
-            ? contents.replacingOccurrences(of: old, with: new)
-            : replaceFirst(old, with: new, in: contents)
+
+        let updated: String
+        if replaceAll {
+            guard contents.contains(old) else { throw ToolError.editTargetNotFound(path: path) }
+            updated = contents.replacingOccurrences(of: old, with: new)
+        } else {
+            // Unique-match contract: a single exact match is replaced; multiple
+            // matches are rejected so the model must disambiguate (an unattended
+            // fix loop must never silently edit the wrong site). Only when there
+            // is no exact match do we fall back to a conservative whitespace /
+            // line-ending tolerant retry, which still requires a unique match.
+            let matches = Self.exactRanges(of: old, in: contents)
+            if matches.count == 1 {
+                updated = Self.replacing(matches[0], in: contents, with: new)
+            } else if matches.count > 1 {
+                throw ToolError.ambiguousEditTarget(path: path, count: matches.count)
+            } else if let tolerant = Self.tolerantUniqueRange(of: old, in: contents) {
+                updated = Self.replacing(tolerant, in: contents, with: new)
+            } else {
+                throw ToolError.editTargetNotFound(path: path)
+            }
+        }
+
         let byteCount = updated.utf8.count
         guard byteCount <= policy.maxWriteBytes else {
             throw ToolError.writeTooLarge(bytes: byteCount, limit: policy.maxWriteBytes)
@@ -240,11 +260,93 @@ public actor ToolExecutionLoop {
             fileChanges: [ToolFileChange(path: relativePath(for: url), operation: .edited, snapshotID: snapshotID)])
     }
 
-    private func replaceFirst(_ target: String, with replacement: String, in text: String) -> String {
-        guard let range = text.range(of: target) else { return text }
+    private static func replacing(_ range: Range<String.Index>, in text: String, with replacement: String) -> String {
         var copy = text
         copy.replaceSubrange(range, with: replacement)
         return copy
+    }
+
+    /// All non-overlapping exact ranges of `target` in `text` (bounded by file size).
+    private static func exactRanges(of target: String, in text: String) -> [Range<String.Index>] {
+        guard !target.isEmpty else { return [] }
+        var ranges: [Range<String.Index>] = []
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let range = text.range(of: target, range: searchStart..<text.endIndex) {
+            ranges.append(range)
+            searchStart = range.upperBound > range.lowerBound
+                ? range.upperBound
+                : text.index(after: range.lowerBound)
+        }
+        return ranges
+    }
+
+    /// Conservative tolerant match, used only after an exact match fails: compares
+    /// `target` against `text` under CRLF→LF and per-line trailing-whitespace
+    /// normalization. Returns the real (un-normalized) range to replace only when
+    /// the normalized match is unique; otherwise nil (it never guesses).
+    private static func tolerantUniqueRange(of target: String, in text: String) -> Range<String.Index>? {
+        let (normHay, map) = normalizedWithMap(text)
+        let (normNeedle, _) = normalizedWithMap(target)
+        guard !normNeedle.isEmpty else { return nil }
+        var match: Range<String.Index>?
+        var searchStart = normHay.startIndex
+        while searchStart < normHay.endIndex,
+              let range = normHay.range(of: normNeedle, range: searchStart..<normHay.endIndex) {
+            if match != nil { return nil }   // ambiguous → refuse
+            match = range
+            searchStart = range.upperBound > range.lowerBound
+                ? range.upperBound
+                : normHay.index(after: range.lowerBound)
+        }
+        guard let match else { return nil }
+        let lower = normHay.distance(from: normHay.startIndex, to: match.lowerBound)
+        let upper = normHay.distance(from: normHay.startIndex, to: match.upperBound)
+        return map[lower]..<map[upper]
+    }
+
+    /// Builds a normalized copy of `s` (CR dropped; horizontal whitespace that ends
+    /// a line removed) plus a map from each normalized character offset back to its
+    /// originating `String.Index`. Normalization only DROPS characters, so the map
+    /// is exact and a normalized range maps to a real original range. The map has a
+    /// trailing sentinel entry (`endIndex`) for exclusive upper bounds.
+    private static func normalizedWithMap(_ s: String) -> (text: String, map: [String.Index]) {
+        var text = ""
+        text.reserveCapacity(s.count)
+        var map: [String.Index] = []
+        map.reserveCapacity(s.count + 1)
+        var i = s.startIndex
+        while i < s.endIndex {
+            let c = s[i]
+            if c == "\r" {
+                i = s.index(after: i)
+                continue
+            }
+            if c == " " || c == "\t" {
+                var j = i
+                while j < s.endIndex, s[j] == " " || s[j] == "\t" {
+                    j = s.index(after: j)
+                }
+                let endsLine = j == s.endIndex || s[j] == "\n" || s[j] == "\r"
+                if endsLine {
+                    i = j
+                    continue
+                }
+                var k = i
+                while k < j {
+                    text.append(s[k])
+                    map.append(k)
+                    k = s.index(after: k)
+                }
+                i = j
+                continue
+            }
+            text.append(c)
+            map.append(i)
+            i = s.index(after: i)
+        }
+        map.append(s.endIndex)
+        return (text, map)
     }
 
     private func applyPatch(_ patch: String, request: ToolRequest) async throws -> ToolResult {
@@ -253,49 +355,134 @@ public actor ToolExecutionLoop {
         }
         let files = try parseUnifiedPatch(patch)
         guard !files.isEmpty else { throw ToolError.patchRejected("patch does not contain file hunks") }
-        let paths = files.map(\.path)
-        // New files (`--- /dev/null` + all-addition hunks) are allowed: resolve
-        // without requiring existence and apply against empty contents.
-        let urls = try files.map { try resolve(path: $0.path, mustExist: false) }
-        let fileChanges = zip(paths, urls).map { path, url in
-            ToolFileChange(
-                path: path,
-                operation: FileManager.default.fileExists(atPath: url.path) ? .edited : .created)
+
+        // Phase 1 — plan: resolve paths and compute the full new state IN MEMORY.
+        // Nothing is written until every file validates, so a context mismatch in a
+        // later file cannot leave earlier files partially written (atomic apply).
+        struct PlannedChange {
+            let targetURL: URL
+            let targetPath: String
+            let operation: ToolFileChange.Operation
+            let newContents: String?     // nil ⇒ delete
+            let sourceURL: URL?          // rename source to remove
+            let sourcePath: String?
         }
-        let snapshotID = try await recordMutation(paths: paths, reason: "apply_patch")
-        for (filePatch, url) in zip(files, urls) {
-            let exists = FileManager.default.fileExists(atPath: url.path)
-            if !exists {
-                guard filePatch.hunks.allSatisfy({ hunk in hunk.lines.allSatisfy { $0.marker == "+" } }) else {
-                    throw ToolError.patchRejected("\(filePatch.path) does not exist; only pure-addition hunks can create it")
+
+        func additionOnlyContents(_ filePatch: ParsedPatchFile) -> String {
+            filePatch.hunks.flatMap { $0.lines.map(\.text) }.joined(separator: "\n") + "\n"
+        }
+
+        var planned: [PlannedChange] = []
+        var snapshotPaths: [String] = []
+
+        for filePatch in files {
+            switch filePatch.op {
+            case .delete:
+                let target = try resolve(path: filePatch.path, mustExist: true)
+                let rel = relativePath(for: target)
+                snapshotPaths.append(rel)
+                planned.append(PlannedChange(
+                    targetURL: target, targetPath: rel, operation: .deleted,
+                    newContents: nil, sourceURL: nil, sourcePath: nil))
+
+            case .rename:
+                guard let oldPath = filePatch.oldPath else {
+                    throw ToolError.patchRejected("rename patch missing source path")
+                }
+                let source = try resolve(path: oldPath, mustExist: true)
+                let target = try resolve(path: filePatch.path, mustExist: false)
+                let sourceContents = try String(contentsOf: source, encoding: .utf8)
+                let newContents = filePatch.hunks.isEmpty
+                    ? sourceContents
+                    : try apply(filePatch, to: sourceContents)
+                try ensureWithinWriteLimit(newContents)
+                let sourceRel = relativePath(for: source)
+                let targetRel = relativePath(for: target)
+                snapshotPaths.append(sourceRel)
+                snapshotPaths.append(targetRel)
+                planned.append(PlannedChange(
+                    targetURL: target, targetPath: targetRel, operation: .renamed,
+                    newContents: newContents, sourceURL: source, sourcePath: sourceRel))
+
+            case .create:
+                let target = try resolve(path: filePatch.path, mustExist: false)
+                guard !FileManager.default.fileExists(atPath: target.path) else {
+                    throw ToolError.patchRejected("\(filePatch.path) already exists")
+                }
+                guard filePatch.hunks.allSatisfy({ $0.lines.allSatisfy { $0.marker == "+" } }) else {
+                    throw ToolError.patchRejected("\(filePatch.path) creation must contain only addition lines")
+                }
+                let newContents = additionOnlyContents(filePatch)
+                try ensureWithinWriteLimit(newContents)
+                let rel = relativePath(for: target)
+                snapshotPaths.append(rel)
+                planned.append(PlannedChange(
+                    targetURL: target, targetPath: rel, operation: .created,
+                    newContents: newContents, sourceURL: nil, sourcePath: nil))
+
+            case .edit:
+                let target = try resolve(path: filePatch.path, mustExist: false)
+                let rel = relativePath(for: target)
+                if FileManager.default.fileExists(atPath: target.path) {
+                    let contents = try String(contentsOf: target, encoding: .utf8)
+                    let newContents = try apply(filePatch, to: contents)
+                    try ensureWithinWriteLimit(newContents)
+                    snapshotPaths.append(rel)
+                    planned.append(PlannedChange(
+                        targetURL: target, targetPath: rel, operation: .edited,
+                        newContents: newContents, sourceURL: nil, sourcePath: nil))
+                } else {
+                    // No explicit create marker but the file is missing: allow only
+                    // pure-addition hunks to create it (back-compat with old behavior).
+                    guard filePatch.hunks.allSatisfy({ $0.lines.allSatisfy { $0.marker == "+" } }) else {
+                        throw ToolError.patchRejected("\(filePatch.path) does not exist; only pure-addition hunks can create it")
+                    }
+                    let newContents = additionOnlyContents(filePatch)
+                    try ensureWithinWriteLimit(newContents)
+                    snapshotPaths.append(rel)
+                    planned.append(PlannedChange(
+                        targetURL: target, targetPath: rel, operation: .created,
+                        newContents: newContents, sourceURL: nil, sourcePath: nil))
                 }
             }
-            let contents = exists ? try String(contentsOf: url, encoding: .utf8) : ""
-            let updated: String
-            if exists {
-                updated = try apply(filePatch, to: contents)
-            } else {
-                // Build the new file directly from the addition lines.
-                updated = filePatch.hunks.flatMap { $0.lines.map(\.text) }.joined(separator: "\n") + "\n"
-            }
-            guard updated.utf8.count <= policy.maxWriteBytes else {
-                throw ToolError.writeTooLarge(bytes: updated.utf8.count, limit: policy.maxWriteBytes)
-            }
-            if !exists {
-                try FileManager.default.createDirectory(
-                    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            }
-            try updated.write(to: url, atomically: true, encoding: .utf8)
         }
-        let verification = urls.compactMap { Self.verifiedSummary(url: $0) }.joined(separator: "\n")
+
+        // Phase 2 — commit: snapshot, then mutate the filesystem.
+        let snapshotID = try await recordMutation(paths: snapshotPaths, reason: "apply_patch")
+        var headerLines: [String] = []
+        var verifiedLines: [String] = []
+        var changes: [ToolFileChange] = []
+        for change in planned {
+            switch change.operation {
+            case .deleted:
+                try FileManager.default.removeItem(at: change.targetURL)
+                headerLines.append("deleted \(change.targetPath)")
+            default:
+                if let newContents = change.newContents {
+                    try FileManager.default.createDirectory(
+                        at: change.targetURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try newContents.write(to: change.targetURL, atomically: true, encoding: .utf8)
+                }
+                if change.operation == .renamed,
+                   let source = change.sourceURL,
+                   source.standardizedFileURL != change.targetURL.standardizedFileURL {
+                    try? FileManager.default.removeItem(at: source)
+                    headerLines.append("renamed \(change.sourcePath ?? "?") → \(change.targetPath)")
+                } else {
+                    headerLines.append(change.targetPath)
+                }
+                if let line = Self.verifiedSummary(url: change.targetURL) { verifiedLines.append(line) }
+            }
+            changes.append(ToolFileChange(path: change.targetPath, operation: change.operation, snapshotID: snapshotID))
+        }
+
+        let verification = verifiedLines.joined(separator: "\n")
         return ToolResult(
             request: request,
-            stdout: paths.joined(separator: "\n") + (verification.isEmpty ? "" : "\n" + verification),
+            stdout: headerLines.joined(separator: "\n") + (verification.isEmpty ? "" : "\n" + verification),
             didWrite: true,
             snapshotID: snapshotID,
-            fileChanges: fileChanges.map {
-                ToolFileChange(path: $0.path, operation: $0.operation, snapshotID: snapshotID)
-            })
+            fileChanges: changes)
     }
 
     /// Post-write verification line fed back to the model: re-reads the file so
@@ -431,7 +618,15 @@ public actor ToolExecutionLoop {
     }
 
     private struct ParsedPatchFile {
-        var path: String
+        enum Op {
+            case edit
+            case create
+            case delete
+            case rename
+        }
+        var path: String          // destination path (file removed for `.delete`)
+        var oldPath: String?      // rename source
+        var op: Op
         var hunks: [ParsedPatchHunk]
     }
 
@@ -448,53 +643,131 @@ public actor ToolExecutionLoop {
     private func parseUnifiedPatch(_ patch: String) throws -> [ParsedPatchFile] {
         let lines = patch.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var files: [ParsedPatchFile] = []
-        var currentPath: String?
-        var currentHunks: [ParsedPatchHunk] = []
+
+        // Per-file accumulators, reset by finishFile().
+        var headerOld: String?      // from "diff --git a/old"
+        var headerNew: String?      // from "diff --git b/new"
+        var minusPath: String?      // from "--- "  (raw, may be /dev/null)
+        var plusPath: String?       // from "+++ "  (raw, may be /dev/null)
+        var renameFrom: String?
+        var renameTo: String?
+        var explicitDelete = false  // "deleted file mode"
+        var explicitCreate = false  // "new file mode"
+        var hunks: [ParsedPatchHunk] = []
         var currentHunk: ParsedPatchHunk?
+        var started = false
 
         func finishHunk() {
             if let hunk = currentHunk {
-                currentHunks.append(hunk)
+                hunks.append(hunk)
                 currentHunk = nil
             }
         }
 
-        func finishFile() {
+        func resolved(_ raw: String?) -> String? {
+            guard let raw, raw != "/dev/null" else { return nil }
+            return stripPatchPrefix(raw)
+        }
+
+        func reset() {
+            headerOld = nil; headerNew = nil
+            minusPath = nil; plusPath = nil
+            renameFrom = nil; renameTo = nil
+            explicitDelete = false; explicitCreate = false
+            hunks = []; currentHunk = nil
+            started = false
+        }
+
+        func finishFile() throws {
             finishHunk()
-            if let path = currentPath, !currentHunks.isEmpty {
-                files.append(ParsedPatchFile(path: path, hunks: currentHunks))
+            guard started else { return }
+            let isRename = renameFrom != nil && renameTo != nil
+            let isDelete = explicitDelete || plusPath == "/dev/null"
+            let isCreate = explicitCreate || minusPath == "/dev/null"
+            let dest = resolved(plusPath) ?? renameTo.map(stripPatchPrefix) ?? headerNew
+            let src = resolved(minusPath) ?? renameFrom.map(stripPatchPrefix) ?? headerOld
+
+            if isRename {
+                guard let to = renameTo.map(stripPatchPrefix) ?? dest else {
+                    throw ToolError.patchRejected("rename patch missing destination path")
+                }
+                files.append(ParsedPatchFile(
+                    path: to, oldPath: renameFrom.map(stripPatchPrefix) ?? src, op: .rename, hunks: hunks))
+            } else if isDelete {
+                guard let path = src ?? dest else {
+                    throw ToolError.patchRejected("delete patch missing path")
+                }
+                files.append(ParsedPatchFile(path: path, oldPath: nil, op: .delete, hunks: hunks))
+            } else if isCreate {
+                guard let path = dest ?? src else {
+                    throw ToolError.patchRejected("create patch missing path")
+                }
+                files.append(ParsedPatchFile(path: path, oldPath: nil, op: .create, hunks: hunks))
+            } else if !hunks.isEmpty {
+                guard let path = dest ?? src else {
+                    throw ToolError.patchRejected("patch missing file path")
+                }
+                files.append(ParsedPatchFile(path: path, oldPath: nil, op: .edit, hunks: hunks))
             }
-            currentPath = nil
-            currentHunks = []
+            // else: a metadata-only section (e.g. mode change) → nothing to apply.
+            reset()
         }
 
         for line in lines {
             if line.hasPrefix("diff --git ") {
-                finishFile()
+                try finishFile()
+                started = true
+                let rest = String(line.dropFirst("diff --git ".count))
+                let parts = rest.split(separator: " ", maxSplits: 1).map(String.init)
+                if parts.count == 2 {
+                    headerOld = stripPatchPrefix(parts[0])
+                    headerNew = stripPatchPrefix(parts[1])
+                }
+                continue
+            }
+            if line.hasPrefix("rename from ") {
+                renameFrom = String(line.dropFirst("rename from ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                started = true
+                continue
+            }
+            if line.hasPrefix("rename to ") {
+                renameTo = String(line.dropFirst("rename to ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                started = true
+                continue
+            }
+            if line.hasPrefix("deleted file mode") { explicitDelete = true; started = true; continue }
+            if line.hasPrefix("new file mode") { explicitCreate = true; started = true; continue }
+            if line.hasPrefix("--- ") {
+                // In a plain unified diff (no "diff --git"), a fresh "--- " after a
+                // completed file section starts the next file.
+                if headerOld == nil, headerNew == nil, plusPath != nil || !hunks.isEmpty || currentHunk != nil {
+                    try finishFile()
+                }
+                minusPath = String(line.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+                started = true
                 continue
             }
             if line.hasPrefix("+++ ") {
-                finishFile()
-                let rawPath = String(line.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard rawPath != "/dev/null" else {
-                    throw ToolError.patchRejected("creating files from patches is not supported yet")
-                }
-                currentPath = stripPatchPrefix(rawPath)
+                plusPath = String(line.dropFirst(4)).trimmingCharacters(in: .whitespacesAndNewlines)
+                started = true
                 continue
             }
             if line.hasPrefix("@@ ") {
                 finishHunk()
                 currentHunk = ParsedPatchHunk(oldStart: try parseOldStart(line), lines: [])
+                started = true
                 continue
             }
-            guard currentPath != nil, currentHunk != nil else { continue }
+            // Inside a hunk: body lines. Outside a hunk: ignore git metadata
+            // (index, similarity index, old/new mode, Binary files, …).
+            guard currentHunk != nil else { continue }
             guard let marker = line.first, marker == " " || marker == "-" || marker == "+" else {
                 if line.hasPrefix("\\ No newline") { continue }
                 throw ToolError.patchRejected("unsupported patch line: \(line)")
             }
             currentHunk?.lines.append(ParsedPatchLine(marker: marker, text: String(line.dropFirst())))
         }
-        finishFile()
+        try finishFile()
         return files
     }
 
@@ -535,13 +808,13 @@ public actor ToolExecutionLoop {
             for line in hunk.lines {
                 switch line.marker {
                 case " ":
-                    guard cursor < original.count, original[cursor] == line.text else {
+                    guard cursor < original.count, Self.lineMatches(original[cursor], line.text) else {
                         throw ToolError.patchRejected("context mismatch in \(patch.path)")
                     }
-                    output.append(original[cursor])
+                    output.append(original[cursor])   // preserve the file's real content
                     cursor += 1
                 case "-":
-                    guard cursor < original.count, original[cursor] == line.text else {
+                    guard cursor < original.count, Self.lineMatches(original[cursor], line.text) else {
                         throw ToolError.patchRejected("remove mismatch in \(patch.path)")
                     }
                     cursor += 1
@@ -559,9 +832,42 @@ public actor ToolExecutionLoop {
         return output.joined(separator: "\n")
     }
 
+    /// Conservative tolerant line equality for patch context/remove lines: exact
+    /// first, then CRLF→LF and trailing-whitespace-insensitive.
+    private static func lineMatches(_ a: String, _ b: String) -> Bool {
+        a == b || normalizedLine(a) == normalizedLine(b)
+    }
+
+    private static func normalizedLine(_ s: String) -> String {
+        var t = Substring(s)
+        if t.hasSuffix("\r") { t = t.dropLast() }
+        while let last = t.last, last == " " || last == "\t" { t = t.dropLast() }
+        return String(t)
+    }
+
+    private func ensureWithinWriteLimit(_ contents: String) throws {
+        let bytes = contents.utf8.count
+        guard bytes <= policy.maxWriteBytes else {
+            throw ToolError.writeTooLarge(bytes: bytes, limit: policy.maxWriteBytes)
+        }
+    }
+
     private func run(command: [String], request: ToolRequest) async throws -> ToolResult {
         guard !command.isEmpty else { throw ToolError.invalidCommand }
         try policy.validate(command: command)
+        let captured = try await runProcessCapturing(command: command, timeoutSeconds: policy.timeoutSeconds)
+        return ToolResult(
+            request: request,
+            exitCode: captured.exitCode,
+            stdout: captured.stdout,
+            stderr: captured.stderr)
+    }
+
+    /// Runs `command` and captures bounded stdout/stderr + exit code. Does NOT
+    /// validate against the policy — the caller is responsible for that (so the
+    /// verify loop can run whitelisted build/test commands under verifyPermission
+    /// rather than the network gate).
+    private func runProcessCapturing(command: [String], timeoutSeconds: Double) async throws -> (exitCode: Int32, stdout: String, stderr: String) {
         log.debug("tool start \(command.joined(separator: " "), privacy: .public)")
 
         let stdout = OutputBuffer(limit: policy.maxOutputBytes)
@@ -592,16 +898,12 @@ public actor ToolExecutionLoop {
         }
 
         do {
-            let exit = try await waitForProcess(box, command: command)
+            let exit = try await waitForProcess(box, command: command, timeoutSeconds: timeoutSeconds)
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             stderrPipe.fileHandleForReading.readabilityHandler = nil
             stdout.append(stdoutPipe.fileHandleForReading.availableData)
             stderr.append(stderrPipe.fileHandleForReading.availableData)
-            return ToolResult(
-                request: request,
-                exitCode: exit,
-                stdout: stdout.stringValue,
-                stderr: stderr.stringValue)
+            return (exit, stdout.stringValue, stderr.stringValue)
         } catch {
             stdoutPipe.fileHandleForReading.readabilityHandler = nil
             stderrPipe.fileHandleForReading.readabilityHandler = nil
@@ -611,8 +913,49 @@ public actor ToolExecutionLoop {
         }
     }
 
-    private func waitForProcess(_ box: RunningProcess, command: [String]) async throws -> Int32 {
-        let timeoutSeconds = policy.timeoutSeconds
+    /// Harness-driven verification for the autonomous fix loop: runs the policy's
+    /// verify commands in order (e.g. `swift build`, then the test script),
+    /// short-circuiting on the first failure so a broken build never triggers a
+    /// slow test run. Returns nil when verification is disabled (verifyPermission
+    /// is `.deny`, or no whitelisted command runs). Only commands that also match
+    /// `allowedCommands` execute; gated by verifyPermission, not networkPermission.
+    public func verify(changedPaths: [String]) async -> VerificationOutcome? {
+        guard policy.verifyPermission != .deny else { return nil }
+        var ran: [String] = []
+        for command in policy.verifyCommands where !command.isEmpty {
+            guard policy.matchingPattern(for: command) != nil else { continue }
+            let label = command.joined(separator: " ")
+            ran.append(label)
+            do {
+                let result = try await runProcessCapturing(command: command, timeoutSeconds: policy.verifyTimeoutSeconds)
+                if result.exitCode != 0 {
+                    return VerificationOutcome(
+                        passed: false,
+                        summary: "`\(label)` failed (exit \(result.exitCode))",
+                        details: Self.combinedTail(stdout: result.stdout, stderr: result.stderr, limit: policy.maxOutputBytes))
+                }
+            } catch {
+                return VerificationOutcome(
+                    passed: false,
+                    summary: "`\(label)` could not run",
+                    details: String(describing: error))
+            }
+        }
+        guard !ran.isEmpty else { return nil }
+        return VerificationOutcome(passed: true, summary: "passed: \(ran.joined(separator: ", "))")
+    }
+
+    /// Keeps the trailing (most relevant) portion of combined command output.
+    private static func combinedTail(stdout: String, stderr: String, limit: Int) -> String {
+        let combined = [stdout, stderr]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n")
+        guard limit > 0, combined.utf8.count > limit else { return combined }
+        return "…(truncated)\n" + String(decoding: Array(combined.utf8).suffix(limit), as: UTF8.self)
+    }
+
+    private func waitForProcess(_ box: RunningProcess, command: [String], timeoutSeconds: Double) async throws -> Int32 {
         return try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: Int32.self) { group in
                 group.addTask {
