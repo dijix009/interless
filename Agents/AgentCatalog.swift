@@ -86,7 +86,7 @@ public struct AgentCatalog: Sendable, Equatable {
         let build = AgentDefinition(
             id: "build",
             description: "Implementation and multi-file coding agent.",
-            system: "You are the build agent. Implement native Swift changes with narrow scope, test coverage, and architecture-boundary discipline.",
+            system: "You are the build agent. Implement native Swift changes with narrow scope, test coverage, and architecture-boundary discipline. After you change files the harness automatically builds and runs tests; if it reports failures, fix the root cause and continue rather than reporting completion.",
             mode: .primary)
         let plan = AgentDefinition(
             id: "plan",

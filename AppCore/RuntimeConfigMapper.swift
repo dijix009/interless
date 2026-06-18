@@ -149,6 +149,8 @@ public enum RuntimeConfigMapper {
             config: config,
             action: "tool.network",
             fallback: settings.allowNetworkTools)
+        let verification = config.verification
+        let verifyEnabled = verification?.enabled ?? true
         return ToolExecutionPolicy(
             allowsWrites: writePermission == .allow,
             networkEnabled: networkPermission == .allow,
@@ -156,7 +158,10 @@ public enum RuntimeConfigMapper {
             networkPermission: toolPermissionEffect(networkPermission),
             timeoutSeconds: 30,
             maxOutputBytes: config.toolOutput?.maxBytes ?? resourceBudget.maxToolOutputBytes,
-            maxWriteBytes: resourceBudget.maxIndexedFileSizeBytes)
+            maxWriteBytes: resourceBudget.maxIndexedFileSizeBytes,
+            verifyPermission: verifyEnabled ? .allow : .deny,
+            verifyCommands: verification?.commands ?? ToolExecutionPolicy.defaultVerifyCommands,
+            verifyTimeoutSeconds: verification?.timeoutSeconds ?? 600)
     }
 
     private static func commandDefinitions(

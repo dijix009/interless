@@ -53,10 +53,26 @@ public enum ToolRequest: Sendable, Equatable, Codable {
     }
 }
 
+/// Outcome of a harness-driven verification pass (build/tests) run automatically
+/// after a turn makes file changes, surfaced back to the model and the UI.
+public struct VerificationOutcome: Sendable, Equatable {
+    public var passed: Bool
+    public var summary: String   // one line, surfaced to the model and the UI
+    public var details: String   // bounded stdout/stderr tail to fix from
+
+    public init(passed: Bool, summary: String, details: String = "") {
+        self.passed = passed
+        self.summary = summary
+        self.details = details
+    }
+}
+
 public struct ToolFileChange: Sendable, Equatable, Codable, Hashable {
     public enum Operation: String, Sendable, Equatable, Codable, Hashable, CaseIterable {
         case created
         case edited
+        case deleted
+        case renamed
     }
 
     public var path: String
@@ -147,6 +163,7 @@ public enum ToolError: Error, Sendable, Equatable {
     case settlementUnavailable(String)
     case writeTooLarge(bytes: Int, limit: Int)
     case editTargetNotFound(path: String)
+    case ambiguousEditTarget(path: String, count: Int)
     case patchRejected(String)
     case staleToolCall(name: String, expectedGeneration: Int, actualGeneration: Int)
     case timedOut(command: [String], seconds: Double)
@@ -205,6 +222,15 @@ public struct ToolExecutionPolicy: Sendable, Equatable, Codable {
     public var maxOutputBytes: Int
     public var maxWriteBytes: Int
     public var allowedCommands: [ToolCommandPattern]
+    /// Permission for the harness-driven verify→fix loop's build/test commands.
+    /// Independent of `networkPermission`; `.deny` disables automatic verification.
+    public var verifyPermission: ToolPermissionEffect
+    /// Commands the verify loop runs in order, short-circuiting on first failure.
+    /// Each must also match `allowedCommands`. Empty disables verification.
+    public var verifyCommands: [[String]]
+    /// Per-command timeout for verify commands; longer than `timeoutSeconds`
+    /// because a build/test run is slower than an interactive tool call.
+    public var verifyTimeoutSeconds: Double
 
     public init(
         allowsWrites: Bool = false,
@@ -214,7 +240,10 @@ public struct ToolExecutionPolicy: Sendable, Equatable, Codable {
         timeoutSeconds: Double = 30,
         maxOutputBytes: Int = 64 * 1024,
         maxWriteBytes: Int = 1 * 1024 * 1024,
-        allowedCommands: [ToolCommandPattern] = Self.defaultAllowedCommands
+        allowedCommands: [ToolCommandPattern] = Self.defaultAllowedCommands,
+        verifyPermission: ToolPermissionEffect? = nil,
+        verifyCommands: [[String]] = Self.defaultVerifyCommands,
+        verifyTimeoutSeconds: Double = 600
     ) {
         self.allowsWrites = allowsWrites
         self.networkEnabled = networkEnabled
@@ -224,6 +253,9 @@ public struct ToolExecutionPolicy: Sendable, Equatable, Codable {
         self.maxOutputBytes = max(0, maxOutputBytes)
         self.maxWriteBytes = max(0, maxWriteBytes)
         self.allowedCommands = allowedCommands
+        self.verifyPermission = verifyPermission ?? .allow
+        self.verifyCommands = verifyCommands
+        self.verifyTimeoutSeconds = max(1, verifyTimeoutSeconds)
     }
 
     public var canRequestWrites: Bool {
@@ -243,6 +275,9 @@ public struct ToolExecutionPolicy: Sendable, Equatable, Codable {
         case maxOutputBytes
         case maxWriteBytes
         case allowedCommands
+        case verifyPermission
+        case verifyCommands
+        case verifyTimeoutSeconds
     }
 
     public init(from decoder: Decoder) throws {
@@ -255,7 +290,10 @@ public struct ToolExecutionPolicy: Sendable, Equatable, Codable {
             timeoutSeconds: try container.decodeIfPresent(Double.self, forKey: .timeoutSeconds) ?? 30,
             maxOutputBytes: try container.decodeIfPresent(Int.self, forKey: .maxOutputBytes) ?? 64 * 1024,
             maxWriteBytes: try container.decodeIfPresent(Int.self, forKey: .maxWriteBytes) ?? 1 * 1024 * 1024,
-            allowedCommands: try container.decodeIfPresent([ToolCommandPattern].self, forKey: .allowedCommands) ?? Self.defaultAllowedCommands)
+            allowedCommands: try container.decodeIfPresent([ToolCommandPattern].self, forKey: .allowedCommands) ?? Self.defaultAllowedCommands,
+            verifyPermission: try container.decodeIfPresent(ToolPermissionEffect.self, forKey: .verifyPermission),
+            verifyCommands: try container.decodeIfPresent([[String]].self, forKey: .verifyCommands) ?? Self.defaultVerifyCommands,
+            verifyTimeoutSeconds: try container.decodeIfPresent(Double.self, forKey: .verifyTimeoutSeconds) ?? 600)
     }
 
     public init(
@@ -265,7 +303,10 @@ public struct ToolExecutionPolicy: Sendable, Equatable, Codable {
         writePermission: ToolPermissionEffect? = nil,
         networkPermission: ToolPermissionEffect? = nil,
         timeoutSeconds: Double = 30,
-        allowedCommands: [ToolCommandPattern] = Self.defaultAllowedCommands
+        allowedCommands: [ToolCommandPattern] = Self.defaultAllowedCommands,
+        verifyPermission: ToolPermissionEffect? = nil,
+        verifyCommands: [[String]] = Self.defaultVerifyCommands,
+        verifyTimeoutSeconds: Double = 600
     ) {
         self.init(
             allowsWrites: allowsWrites,
@@ -275,7 +316,10 @@ public struct ToolExecutionPolicy: Sendable, Equatable, Codable {
             timeoutSeconds: timeoutSeconds,
             maxOutputBytes: resourceBudget.maxToolOutputBytes,
             maxWriteBytes: resourceBudget.maxIndexedFileSizeBytes,
-            allowedCommands: allowedCommands)
+            allowedCommands: allowedCommands,
+            verifyPermission: verifyPermission,
+            verifyCommands: verifyCommands,
+            verifyTimeoutSeconds: verifyTimeoutSeconds)
     }
 
     public static let defaultAllowedCommands: [ToolCommandPattern] = [
@@ -284,6 +328,13 @@ public struct ToolExecutionPolicy: Sendable, Equatable, Codable {
         ToolCommandPattern(executable: "git", argumentsPrefix: ["status"], requiresNetworkPermission: false),
         ToolCommandPattern(executable: "git", argumentsPrefix: ["diff"], requiresNetworkPermission: false),
         ToolCommandPattern(executable: "./scripts/test.sh"),
+    ]
+
+    /// Default verify→fix commands: compile first (fast, gates the slow test run),
+    /// then the project test script.
+    public static let defaultVerifyCommands: [[String]] = [
+        ["swift", "build"],
+        ["./scripts/test.sh"],
     ]
 
     public static let `default` = ToolExecutionPolicy()

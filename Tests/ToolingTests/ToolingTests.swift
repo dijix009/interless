@@ -208,6 +208,177 @@ struct ToolingTests {
         #expect(try String(contentsOf: temp.url.appendingPathComponent("new/Created.txt"), encoding: .utf8) == "first line\nsecond line\n")
     }
 
+    @Test func editFileRejectsAmbiguousMatchUnlessReplaceAll() async throws {
+        let temp = try TempWorkspace()
+        try temp.write("x\nx\n", to: "ambiguous.txt")
+        let loop = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+
+        await #expect(throws: ToolError.ambiguousEditTarget(path: "ambiguous.txt", count: 2)) {
+            _ = try await loop.execute(.editFile(path: "ambiguous.txt", old: "x", new: "y"))
+        }
+        // The file is untouched by the rejected edit.
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("ambiguous.txt"), encoding: .utf8) == "x\nx\n")
+
+        let all = try await loop.execute(.editFile(path: "ambiguous.txt", old: "x", new: "y", replaceAll: true))
+        #expect(all.didWrite)
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("ambiguous.txt"), encoding: .utf8) == "y\ny\n")
+    }
+
+    @Test func editFileToleratesTrailingWhitespaceWhenExactFails() async throws {
+        let temp = try TempWorkspace()
+        // `beta` carries trailing spaces the model omits in `old`; exact match fails,
+        // tolerant retry finds the unique span and replaces only it.
+        try temp.write("alpha\nbeta  \ngamma\n", to: "tol.txt")
+        let loop = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+
+        let result = try await loop.execute(.editFile(path: "tol.txt", old: "beta\ngamma", new: "BETA\nGAMMA"))
+        #expect(result.didWrite)
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("tol.txt"), encoding: .utf8) == "alpha\nBETA\nGAMMA\n")
+    }
+
+    @Test func writeFileEmitsVerifiedSummary() async throws {
+        let temp = try TempWorkspace()
+        let loop = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+        let result = try await loop.execute(.writeFile(path: "note.txt", contents: "line1\nline2\n"))
+        #expect(result.stdout.contains("verified note.txt"))
+    }
+
+    @Test func applyPatchDeletesFile() async throws {
+        let temp = try TempWorkspace()
+        try temp.write("bye\n", to: "doomed.txt")
+        let loop = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+        let result = try await loop.execute(.applyPatch(patch: """
+        diff --git a/doomed.txt b/doomed.txt
+        deleted file mode 100644
+        --- a/doomed.txt
+        +++ /dev/null
+        @@ -1,1 +0,0 @@
+        -bye
+        """))
+        #expect(result.didWrite)
+        #expect(result.stdout.contains("deleted doomed.txt"))
+        #expect(result.fileChanges.map(\.operation) == [.deleted])
+        #expect(!FileManager.default.fileExists(atPath: temp.url.appendingPathComponent("doomed.txt").path))
+    }
+
+    @Test func applyPatchRenamesAndPatchesFile() async throws {
+        let temp = try TempWorkspace()
+        try temp.write("alpha\nbeta\n", to: "old.txt")
+        let loop = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+        let result = try await loop.execute(.applyPatch(patch: """
+        diff --git a/old.txt b/new.txt
+        similarity index 80%
+        rename from old.txt
+        rename to new.txt
+        --- a/old.txt
+        +++ b/new.txt
+        @@ -1,2 +1,2 @@
+         alpha
+        -beta
+        +gamma
+        """))
+        #expect(result.didWrite)
+        #expect(result.stdout.contains("renamed old.txt → new.txt"))
+        #expect(result.fileChanges.map(\.operation) == [.renamed])
+        #expect(!FileManager.default.fileExists(atPath: temp.url.appendingPathComponent("old.txt").path))
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("new.txt"), encoding: .utf8) == "alpha\ngamma\n")
+    }
+
+    @Test func applyPatchPureRenameMovesContentUnchanged() async throws {
+        let temp = try TempWorkspace()
+        try temp.write("keep\n", to: "a.txt")
+        let loop = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+        let result = try await loop.execute(.applyPatch(patch: """
+        diff --git a/a.txt b/b.txt
+        similarity index 100%
+        rename from a.txt
+        rename to b.txt
+        """))
+        #expect(result.fileChanges.map(\.operation) == [.renamed])
+        #expect(!FileManager.default.fileExists(atPath: temp.url.appendingPathComponent("a.txt").path))
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("b.txt"), encoding: .utf8) == "keep\n")
+    }
+
+    @Test func applyPatchToleratesContextWhitespaceAndPreservesRealContent() async throws {
+        let temp = try TempWorkspace()
+        try temp.write("foo  \nbar\n", to: "ctx.txt")
+        let loop = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+        let result = try await loop.execute(.applyPatch(patch: """
+        diff --git a/ctx.txt b/ctx.txt
+        --- a/ctx.txt
+        +++ b/ctx.txt
+        @@ -1,2 +1,2 @@
+         foo
+        -bar
+        +baz
+        """))
+        #expect(result.didWrite)
+        // The context line matched tolerantly, but the file's real trailing space is preserved.
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("ctx.txt"), encoding: .utf8) == "foo  \nbaz\n")
+    }
+
+    @Test func applyPatchIsAtomicWhenALaterFileFails() async throws {
+        let temp = try TempWorkspace()
+        try temp.write("one\n", to: "file1.txt")
+        try temp.write("two\n", to: "file2.txt")
+        let loop = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(allowsWrites: true))
+
+        await #expect(throws: ToolError.patchRejected("remove mismatch in file2.txt")) {
+            _ = try await loop.execute(.applyPatch(patch: """
+            diff --git a/file1.txt b/file1.txt
+            --- a/file1.txt
+            +++ b/file1.txt
+            @@ -1,1 +1,1 @@
+            -one
+            +ONE
+            diff --git a/file2.txt b/file2.txt
+            --- a/file2.txt
+            +++ b/file2.txt
+            @@ -1,1 +1,1 @@
+            -WRONG
+            +TWO
+            """))
+        }
+        // The first file's planned edit is never written because the second file fails validation.
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("file1.txt"), encoding: .utf8) == "one\n")
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("file2.txt"), encoding: .utf8) == "two\n")
+    }
+
+    @Test func verifyRunsWhitelistedCommandUnderVerifyPermission() async throws {
+        let temp = try TempWorkspace()
+        let policy = ToolExecutionPolicy(
+            allowedCommands: [ToolCommandPattern(executable: "true", requiresNetworkPermission: false)],
+            verifyCommands: [["true"]])
+        let loop = try ToolExecutionLoop(root: temp.url, policy: policy)
+        let outcome = await loop.verify(changedPaths: ["x.swift"])
+        #expect(outcome?.passed == true)
+    }
+
+    @Test func verifyReportsFailureAndShortCircuitsOnFirstFailingCommand() async throws {
+        let temp = try TempWorkspace()
+        let policy = ToolExecutionPolicy(
+            allowedCommands: [
+                ToolCommandPattern(executable: "true", requiresNetworkPermission: false),
+                ToolCommandPattern(executable: "false", requiresNetworkPermission: false),
+            ],
+            verifyCommands: [["true"], ["false"]])
+        let loop = try ToolExecutionLoop(root: temp.url, policy: policy)
+        let outcome = await loop.verify(changedPaths: [])
+        #expect(outcome?.passed == false)
+        #expect(outcome?.summary.contains("false") == true)
+    }
+
+    @Test func verifyIsDisabledByPermissionOrUnwhitelistedCommand() async throws {
+        let temp = try TempWorkspace()
+        let denied = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(
+            verifyPermission: .deny, verifyCommands: [["true"]]))
+        #expect(await denied.verify(changedPaths: []) == nil)
+
+        let unwhitelisted = try ToolExecutionLoop(root: temp.url, policy: ToolExecutionPolicy(
+            allowedCommands: [], verifyCommands: [["true"]]))
+        #expect(await unwhitelisted.verify(changedPaths: []) == nil)
+    }
+
     @Test func managedOutputStoreRetainsBoundedOutputRefs() async throws {
         let temp = try TempWorkspace()
         try temp.write("0123456789", to: "large.txt")

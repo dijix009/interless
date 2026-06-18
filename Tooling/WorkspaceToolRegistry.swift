@@ -193,19 +193,19 @@ private let writeFileDefinition = ToolDefinition(
 
 private let editFileDefinition = ToolDefinition(
     name: "edit_file",
-    description: "Replace text inside a UTF-8 workspace file when writes are explicitly enabled.",
+    description: "Replace text inside a UTF-8 workspace file when writes are explicitly enabled. `old` must match a single, unique span; if it occurs more than once the edit is rejected — add surrounding context to disambiguate, or set `replace_all` to replace every occurrence.",
     parameters: objectSchema(
         properties: [
             "path": stringSchema("Workspace-relative file path to edit."),
-            "old": stringSchema("Exact text to replace."),
+            "old": stringSchema("Exact text to replace. Include enough surrounding context to be unique in the file."),
             "new": stringSchema("Replacement text."),
-            "replace_all": booleanSchema("Whether to replace every occurrence instead of the first."),
+            "replace_all": booleanSchema("Replace every occurrence instead of requiring a unique single match."),
         ],
         required: ["path", "old", "new"]))
 
 private let applyPatchDefinition = ToolDefinition(
     name: "apply_patch",
-    description: "Apply a bounded unified diff to workspace files when writes are explicitly enabled.",
+    description: "Apply a bounded unified diff to workspace files when writes are explicitly enabled. Supports editing, creating (`--- /dev/null`), deleting (`+++ /dev/null`), and git renames (`rename from`/`rename to`). Context lines are matched whitespace- and line-ending-tolerant, and a multi-file patch applies atomically (all files or none).",
     parameters: objectSchema(
         properties: ["patch": stringSchema("Unified diff text.")],
         required: ["patch"]))

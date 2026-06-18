@@ -456,12 +456,22 @@ public struct ChatPaneView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func changedFileBadge(_ operation: String) -> (label: String, tint: Color) {
+        switch operation {
+        case "created": return ("Created", Theme.C.success)
+        case "deleted": return ("Deleted", Theme.C.danger)
+        case "renamed": return ("Renamed", Theme.C.info)
+        default: return ("Edited", Theme.C.caution)
+        }
+    }
+
     private func changedFileRow(_ file: ChangedFileSummaryViewState) -> some View {
-        HStack(spacing: .space2) {
-            Text(file.operation == "created" ? "Created" : "Edited")
+        let badge = changedFileBadge(file.operation)
+        return HStack(spacing: .space2) {
+            Text(badge.label)
                 .font(.metaMono)
-                .foregroundStyle(file.operation == "created" ? Theme.C.success : Theme.C.caution)
-                .frame(width: 52, alignment: .leading)
+                .foregroundStyle(badge.tint)
+                .frame(width: 60, alignment: .leading)
             Text(file.path)
                 .font(.bodyS)
                 .foregroundStyle(Theme.C.textPrimary)

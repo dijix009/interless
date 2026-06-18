@@ -239,6 +239,31 @@ public struct ToolOutputConfig: Sendable, Equatable, Codable {
     }
 }
 
+/// Configures the autonomous edit→verify→fix loop. When `enabled`, after a turn
+/// changes files the harness runs `commands` in order (default: build, then the
+/// test script), feeds failures back, and lets the model fix up to `maxAttempts`
+/// times. Omitted fields fall back to defaults (enabled, build+tests, 2 attempts).
+public struct VerificationConfig: Sendable, Equatable, Codable {
+    public var enabled: Bool?
+    public var commands: [[String]]?
+    public var maxAttempts: Int?
+    public var timeoutSeconds: Double?
+
+    public init(enabled: Bool? = nil, commands: [[String]]? = nil, maxAttempts: Int? = nil, timeoutSeconds: Double? = nil) {
+        self.enabled = enabled
+        self.commands = commands
+        self.maxAttempts = maxAttempts
+        self.timeoutSeconds = timeoutSeconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case commands
+        case maxAttempts = "max_attempts"
+        case timeoutSeconds = "timeout_seconds"
+    }
+}
+
 public struct ProviderDefinition: Sendable, Equatable, Codable {
     public struct Model: Sendable, Equatable, Codable {
         public var api: [String: JSONValue]
@@ -496,6 +521,7 @@ public struct InterlessConfig: Sendable, Equatable, Codable {
     public var lsp: BooleanOrMap<ConfiguredCommand>?
     public var attachments: AttachmentConfig?
     public var toolOutput: ToolOutputConfig?
+    public var verification: VerificationConfig?
     public var share: String?
     public var enterprise: [String: JSONValue]
     public var username: String?
@@ -521,6 +547,7 @@ public struct InterlessConfig: Sendable, Equatable, Codable {
         lsp: BooleanOrMap<ConfiguredCommand>? = nil,
         attachments: AttachmentConfig? = nil,
         toolOutput: ToolOutputConfig? = nil,
+        verification: VerificationConfig? = nil,
         share: String? = nil,
         enterprise: [String: JSONValue] = [:],
         username: String? = nil,
@@ -545,6 +572,7 @@ public struct InterlessConfig: Sendable, Equatable, Codable {
         self.lsp = lsp
         self.attachments = attachments
         self.toolOutput = toolOutput
+        self.verification = verification
         self.share = share
         self.enterprise = enterprise
         self.username = username
@@ -580,6 +608,7 @@ public struct InterlessConfig: Sendable, Equatable, Codable {
         copy.lsp = override.lsp ?? lsp
         copy.attachments = override.attachments ?? attachments
         copy.toolOutput = override.toolOutput ?? toolOutput
+        copy.verification = override.verification ?? verification
         copy.share = override.share ?? share
         copy.enterprise.merge(override.enterprise) { _, new in new }
         copy.username = override.username ?? username
@@ -611,6 +640,7 @@ public struct InterlessConfig: Sendable, Equatable, Codable {
         case attachments
         case attachment
         case toolOutput = "tool_output"
+        case verification
         case share
         case enterprise
         case username
@@ -642,6 +672,7 @@ public struct InterlessConfig: Sendable, Equatable, Codable {
         attachments = try container.decodeIfPresent(AttachmentConfig.self, forKey: .attachments)
             ?? container.decodeIfPresent(AttachmentConfig.self, forKey: .attachment)
         toolOutput = try container.decodeIfPresent(ToolOutputConfig.self, forKey: .toolOutput)
+        verification = try container.decodeIfPresent(VerificationConfig.self, forKey: .verification)
         share = try container.decodeIfPresent(String.self, forKey: .share)
         enterprise = try container.decodeIfPresent([String: JSONValue].self, forKey: .enterprise) ?? [:]
         username = try container.decodeIfPresent(String.self, forKey: .username)
@@ -679,6 +710,7 @@ public struct InterlessConfig: Sendable, Equatable, Codable {
         try container.encodeIfPresent(lsp, forKey: .lsp)
         try container.encodeIfPresent(attachments, forKey: .attachments)
         try container.encodeIfPresent(toolOutput, forKey: .toolOutput)
+        try container.encodeIfPresent(verification, forKey: .verification)
         try container.encodeIfPresent(share, forKey: .share)
         try container.encode(enterprise, forKey: .enterprise)
         try container.encodeIfPresent(username, forKey: .username)

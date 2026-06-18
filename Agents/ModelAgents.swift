@@ -6,6 +6,7 @@ public struct OrchestratorAgent: StreamingAgent {
     private let model: any AgentModelClient
     private let systemPrompt: String
     private let toolLoop: ToolExecutionLoop?
+    private let verifier: WorkspaceVerifier?
     private let toolRegistry: WorkspaceToolRegistry
     private let loopPolicy: AgentLoopPolicy
     private let resourceBudget: ResourceBudget
@@ -15,6 +16,7 @@ public struct OrchestratorAgent: StreamingAgent {
     public init(
         model: any AgentModelClient,
         toolLoop: ToolExecutionLoop? = nil,
+        verifier: WorkspaceVerifier? = nil,
         toolRegistry: WorkspaceToolRegistry = WorkspaceToolRegistry(),
         loopPolicy: AgentLoopPolicy = .default,
         resourceBudget: ResourceBudget = .balanced,
@@ -24,6 +26,7 @@ public struct OrchestratorAgent: StreamingAgent {
     ) {
         self.model = model
         self.toolLoop = toolLoop
+        self.verifier = verifier
         self.toolRegistry = toolRegistry
         self.loopPolicy = loopPolicy
         self.resourceBudget = resourceBudget
@@ -42,6 +45,7 @@ public struct OrchestratorAgent: StreamingAgent {
             route: .orchestrator,
             systemPrompt: systemPrompt,
             toolLoop: toolLoop,
+            verifier: verifier,
             toolRegistry: toolRegistry,
             loopPolicy: loopPolicy,
             resourceBudget: resourceBudget,
@@ -54,6 +58,7 @@ public struct UtilityAgent: StreamingAgent {
     private let model: any AgentModelClient
     private let systemPrompt: String
     private let toolLoop: ToolExecutionLoop?
+    private let verifier: WorkspaceVerifier?
     private let toolRegistry: WorkspaceToolRegistry
     private let loopPolicy: AgentLoopPolicy
     private let resourceBudget: ResourceBudget
@@ -63,6 +68,7 @@ public struct UtilityAgent: StreamingAgent {
     public init(
         model: any AgentModelClient,
         toolLoop: ToolExecutionLoop? = nil,
+        verifier: WorkspaceVerifier? = nil,
         toolRegistry: WorkspaceToolRegistry = WorkspaceToolRegistry(),
         loopPolicy: AgentLoopPolicy = .default,
         resourceBudget: ResourceBudget = .balanced,
@@ -72,6 +78,7 @@ public struct UtilityAgent: StreamingAgent {
     ) {
         self.model = model
         self.toolLoop = toolLoop
+        self.verifier = verifier
         self.toolRegistry = toolRegistry
         self.loopPolicy = loopPolicy
         self.resourceBudget = resourceBudget
@@ -90,6 +97,7 @@ public struct UtilityAgent: StreamingAgent {
             route: .utility,
             systemPrompt: systemPrompt,
             toolLoop: toolLoop,
+            verifier: verifier,
             toolRegistry: toolRegistry,
             loopPolicy: loopPolicy,
             resourceBudget: resourceBudget,
@@ -115,6 +123,7 @@ private struct ModelAgentRunner: Sendable {
     let route: AgentRoute
     let systemPrompt: String
     let toolLoop: ToolExecutionLoop?
+    let verifier: WorkspaceVerifier?
     let toolRegistry: WorkspaceToolRegistry
     let loopPolicy: AgentLoopPolicy
     let resourceBudget: ResourceBudget
@@ -134,8 +143,16 @@ private struct ModelAgentRunner: Sendable {
                     var messages = messages(for: task)
                     var allowToolAdvertisement = !toolRegistry.definitions.isEmpty && loopPolicy.maxToolIterations > 0
                     var retriedWithoutToolsAfterSchemaLeak = false
+                    // Automatic verify→fix state: which files changed since the last
+                    // verification, how many fix loop-backs have been spent, and the
+                    // most recent failing outcome (for an honest final note).
+                    var changedPathsSinceVerify: Set<String> = []
+                    var verifyAttempts = 0
+                    var lastVerificationFailure: VerificationOutcome?
 
-                    for iteration in 1...(loopPolicy.maxToolIterations + 1) {
+                    // Verify-driven fixes may run past maxToolIterations, bounded by
+                    // maxVerifyAttempts (each granted iteration tracked by the guard).
+                    for iteration in 1...(loopPolicy.maxToolIterations + loopPolicy.maxVerifyAttempts + 1) {
                         try Task.checkCancellation()
                         continuation.yield(.toolIterationStarted(iteration))
                         let advertisedTools = allowToolAdvertisement ? toolRegistry.definitions : []
@@ -198,7 +215,42 @@ private struct ModelAgentRunner: Sendable {
                                 retriedWithoutToolsAfterSchemaLeak = true
                                 continue
                             }
+
+                            // The model believes it is done. If this turn changed
+                            // files and a verifier is wired, build/test before
+                            // declaring success; on failure hand the output back so
+                            // the model can fix it (bounded by maxVerifyAttempts).
+                            // An empty changed-set is the no-progress guard: a turn
+                            // that wrote nothing never re-triggers the same failure.
+                            if let verifier, !changedPathsSinceVerify.isEmpty {
+                                let changed = changedPathsSinceVerify.sorted()
+                                changedPathsSinceVerify.removeAll(keepingCapacity: true)
+                                continuation.yield(.verificationStarted(attempt: verifyAttempts + 1))
+                                if let outcome = await verifier(changed) {
+                                    continuation.yield(.verificationFinished(passed: outcome.passed, summary: outcome.summary))
+                                    if outcome.passed {
+                                        lastVerificationFailure = nil
+                                    } else if verifyAttempts < loopPolicy.maxVerifyAttempts {
+                                        verifyAttempts += 1
+                                        lastVerificationFailure = outcome
+                                        if !iterationText.isEmpty {
+                                            messages.append(.init(role: .assistant, content: iterationText))
+                                        }
+                                        messages.append(.init(
+                                            role: .user,
+                                            content: Self.verificationFeedback(outcome, limit: resourceBudget.maxToolOutputBytes)))
+                                        text += iterationText
+                                        continue
+                                    } else {
+                                        lastVerificationFailure = outcome   // budget spent; finish honestly
+                                    }
+                                }
+                            }
+
                             text += iterationText
+                            if let failure = lastVerificationFailure {
+                                text += "\n\n⚠️ Automatic verification did not pass after \(verifyAttempts) fix attempt(s): \(failure.summary)"
+                            }
                             let result = AgentResult(
                                 taskID: task.id,
                                 route: route,
@@ -211,7 +263,7 @@ private struct ModelAgentRunner: Sendable {
                         }
 
                         text += iterationText
-                        guard iteration <= loopPolicy.maxToolIterations else {
+                        guard iteration <= loopPolicy.maxToolIterations + verifyAttempts else {
                             throw AgentError.toolIterationLimitExceeded(loopPolicy.maxToolIterations)
                         }
                         guard toolCalls.count <= loopPolicy.maxToolCallsPerIteration else {
@@ -240,6 +292,9 @@ private struct ModelAgentRunner: Sendable {
                             do {
                                 let toolResult = try await toolLoop.execute(toolRequest)
                                 toolResults.append(toolResult)
+                                for change in toolResult.fileChanges {
+                                    changedPathsSinceVerify.insert(change.path)
+                                }
                                 continuation.yield(.toolFinished(toolResult))
                                 messages.append(.init(role: .tool, content: renderToolResult(toolResult, limit: resourceBudget.maxToolOutputBytes)))
                             } catch {
@@ -276,6 +331,9 @@ private struct ModelAgentRunner: Sendable {
         - Treat the latest request as authoritative.
 
         """
+        if verifier != nil {
+            user += "After you change files, the harness automatically builds and runs tests; if it reports failures, fix the root cause and continue instead of reporting completion.\n\n"
+        }
         user += "Latest request (answer this user message directly):\n\(task.prompt)"
         let resolvedSystemPrompt = resolvedSystemPrompt(for: task)
         return [
@@ -293,6 +351,26 @@ private struct ModelAgentRunner: Sendable {
             return agentCatalog.systemPrompt(agentID: defaultAgentID, fallback: systemPrompt)
         }
         return systemPrompt
+    }
+
+    /// Model-facing message appended after a failed automatic verification, so the
+    /// model can fix the cause on the next pass.
+    private static func verificationFeedback(_ outcome: VerificationOutcome, limit: Int) -> String {
+        var body = "Automatic verification failed after your changes.\n\(outcome.summary)"
+        let details = outcome.details.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !details.isEmpty {
+            body += "\n\n" + boundedTail(details, limit: limit)
+        }
+        body += "\n\nFix the root cause and continue. Do not report completion while verification is failing."
+        return body
+    }
+
+    /// Keeps the most relevant (trailing) portion of long build/test output.
+    private static func boundedTail(_ text: String, limit: Int) -> String {
+        guard limit > 0 else { return "" }
+        let utf8 = Array(text.utf8)
+        guard utf8.count > limit else { return text }
+        return "…(truncated)\n" + String(decoding: utf8.suffix(limit), as: UTF8.self)
     }
 }
 

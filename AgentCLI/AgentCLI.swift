@@ -179,6 +179,10 @@ public enum AgentCLI {
                 lines.append("context")
             case .contextCompacted(let degraded, let dropped):
                 lines.append("context-compacted degraded=\(degraded) dropped=\(dropped)")
+            case .verificationStarted(let attempt):
+                lines.append("verify-start attempt=\(attempt)")
+            case .verificationFinished(let passed, let summary):
+                lines.append("verify-finish passed=\(passed) \(summary)")
             case .token(let chunk):
                 if !chunk.text.isEmpty { lines.append("token \(chunk.text)") }
             case .completed(let result):

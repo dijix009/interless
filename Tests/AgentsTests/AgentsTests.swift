@@ -327,6 +327,192 @@ struct AgentsTests {
         #expect(await model.requestCount() == 1)
     }
 
+    // MARK: - Autonomous verify→fix loop
+
+    @Test func verifyLoopFeedsFailureBackThenCompletesGreen() async throws {
+        let temp = try TempAgentWorkspace()
+        try temp.write("alpha\n", to: "f.txt")
+        let policy = ToolExecutionPolicy(allowsWrites: true)
+        let toolLoop = try ToolExecutionLoop(root: temp.url, policy: policy)
+        let spy = VerifierSpy([
+            VerificationOutcome(passed: false, summary: "`swift build` failed (exit 1)", details: "error: expected ';'"),
+            VerificationOutcome(passed: true, summary: "passed: swift build"),
+        ])
+        let verifier: WorkspaceVerifier = { paths in await spy.verify(paths) }
+        let model = FakeModelClient(streams: [
+            [TokenChunk(text: "", index: 0, isFinal: false, toolCall: ModelToolCall(
+                name: "edit_file",
+                arguments: ["path": .string("f.txt"), "old": .string("alpha"), "new": .string("beta")])),
+             TokenChunk(text: "", index: 1, isFinal: true)],
+            [TokenChunk(text: "done v1", index: 0, isFinal: true)],
+            [TokenChunk(text: "", index: 0, isFinal: false, toolCall: ModelToolCall(
+                name: "edit_file",
+                arguments: ["path": .string("f.txt"), "old": .string("beta"), "new": .string("gamma")])),
+             TokenChunk(text: "", index: 1, isFinal: true)],
+            [TokenChunk(text: "done v2", index: 0, isFinal: true)],
+        ])
+        let agent = UtilityAgent(
+            model: model,
+            toolLoop: toolLoop,
+            verifier: verifier,
+            toolRegistry: WorkspaceToolRegistry(policy: policy),
+            loopPolicy: AgentLoopPolicy(maxToolIterations: 4, maxVerifyAttempts: 2))
+
+        let events = try await collectEvents(agent.run(task: AgentTask(prompt: "edit", kind: .auto)))
+
+        #expect(await spy.callCount() == 2)
+        #expect(verificationStarts(events) == 2)
+        #expect(verificationOutcomes(events) == [false, true])
+        #expect(completedResult(events)?.text.contains("done v2") == true)
+        // The failure detail was handed back to the model on the retry pass.
+        #expect(await model.requests().contains { request in
+            requestMentions(request, "expected ';'")
+        })
+        #expect(try String(contentsOf: temp.url.appendingPathComponent("f.txt"), encoding: .utf8) == "gamma\n")
+    }
+
+    @Test func verifyLoopPassesFirstTryWithoutExtraIteration() async throws {
+        let temp = try TempAgentWorkspace()
+        try temp.write("alpha\n", to: "f.txt")
+        let policy = ToolExecutionPolicy(allowsWrites: true)
+        let toolLoop = try ToolExecutionLoop(root: temp.url, policy: policy)
+        let spy = VerifierSpy([VerificationOutcome(passed: true, summary: "passed: swift build")])
+        let model = FakeModelClient(streams: [
+            [TokenChunk(text: "", index: 0, isFinal: false, toolCall: ModelToolCall(
+                name: "edit_file",
+                arguments: ["path": .string("f.txt"), "old": .string("alpha"), "new": .string("beta")])),
+             TokenChunk(text: "", index: 1, isFinal: true)],
+            [TokenChunk(text: "all done", index: 0, isFinal: true)],
+        ])
+        let agent = UtilityAgent(
+            model: model,
+            toolLoop: toolLoop,
+            verifier: { paths in await spy.verify(paths) },
+            toolRegistry: WorkspaceToolRegistry(policy: policy),
+            loopPolicy: AgentLoopPolicy(maxToolIterations: 4, maxVerifyAttempts: 2))
+
+        let events = try await collectEvents(agent.run(task: AgentTask(prompt: "edit", kind: .auto)))
+
+        #expect(await spy.callCount() == 1)
+        #expect(verificationStarts(events) == 1)
+        #expect(verificationOutcomes(events) == [true])
+        #expect(completedResult(events)?.text.contains("all done") == true)
+    }
+
+    @Test func verifyLoopAbsentWhenVerifierNotWired() async throws {
+        let temp = try TempAgentWorkspace()
+        try temp.write("alpha\n", to: "f.txt")
+        let policy = ToolExecutionPolicy(allowsWrites: true)
+        let toolLoop = try ToolExecutionLoop(root: temp.url, policy: policy)
+        let model = FakeModelClient(streams: [
+            [TokenChunk(text: "", index: 0, isFinal: false, toolCall: ModelToolCall(
+                name: "edit_file",
+                arguments: ["path": .string("f.txt"), "old": .string("alpha"), "new": .string("beta")])),
+             TokenChunk(text: "", index: 1, isFinal: true)],
+            [TokenChunk(text: "done", index: 0, isFinal: true)],
+        ])
+        let agent = UtilityAgent(
+            model: model,
+            toolLoop: toolLoop,
+            toolRegistry: WorkspaceToolRegistry(policy: policy))
+
+        let events = try await collectEvents(agent.run(task: AgentTask(prompt: "edit", kind: .auto)))
+
+        #expect(verificationStarts(events) == 0)
+        #expect(completedResult(events)?.text.contains("done") == true)
+    }
+
+    @Test func verifyLoopNoProgressGuardStopsAndReportsHonestly() async throws {
+        let temp = try TempAgentWorkspace()
+        try temp.write("alpha\n", to: "f.txt")
+        let policy = ToolExecutionPolicy(allowsWrites: true)
+        let toolLoop = try ToolExecutionLoop(root: temp.url, policy: policy)
+        let spy = VerifierSpy([VerificationOutcome(passed: false, summary: "`swift build` failed (exit 1)", details: "boom")])
+        let model = FakeModelClient(streams: [
+            [TokenChunk(text: "", index: 0, isFinal: false, toolCall: ModelToolCall(
+                name: "edit_file",
+                arguments: ["path": .string("f.txt"), "old": .string("alpha"), "new": .string("beta")])),
+             TokenChunk(text: "", index: 1, isFinal: true)],
+            [TokenChunk(text: "first done", index: 0, isFinal: true)],
+            [TokenChunk(text: "I cannot fix this", index: 0, isFinal: true)],
+        ])
+        let agent = UtilityAgent(
+            model: model,
+            toolLoop: toolLoop,
+            verifier: { paths in await spy.verify(paths) },
+            toolRegistry: WorkspaceToolRegistry(policy: policy),
+            loopPolicy: AgentLoopPolicy(maxToolIterations: 4, maxVerifyAttempts: 2))
+
+        let events = try await collectEvents(agent.run(task: AgentTask(prompt: "edit", kind: .auto)))
+
+        // A turn that wrote nothing after the failure does not re-trigger verification.
+        #expect(await spy.callCount() == 1)
+        #expect(verificationStarts(events) == 1)
+        #expect(completedResult(events)?.text.contains("did not pass") == true)
+    }
+
+    @Test func verifyLoopReportsHonestlyWhenAttemptsExhausted() async throws {
+        let temp = try TempAgentWorkspace()
+        try temp.write("alpha\n", to: "f.txt")
+        let policy = ToolExecutionPolicy(allowsWrites: true)
+        let toolLoop = try ToolExecutionLoop(root: temp.url, policy: policy)
+        let spy = VerifierSpy([
+            VerificationOutcome(passed: false, summary: "fail #1", details: "e1"),
+            VerificationOutcome(passed: false, summary: "fail #2", details: "e2"),
+        ])
+        let model = FakeModelClient(streams: [
+            [TokenChunk(text: "", index: 0, isFinal: false, toolCall: ModelToolCall(
+                name: "edit_file",
+                arguments: ["path": .string("f.txt"), "old": .string("alpha"), "new": .string("beta")])),
+             TokenChunk(text: "", index: 1, isFinal: true)],
+            [TokenChunk(text: "done a", index: 0, isFinal: true)],
+            [TokenChunk(text: "", index: 0, isFinal: false, toolCall: ModelToolCall(
+                name: "edit_file",
+                arguments: ["path": .string("f.txt"), "old": .string("beta"), "new": .string("gamma")])),
+             TokenChunk(text: "", index: 1, isFinal: true)],
+            [TokenChunk(text: "done b", index: 0, isFinal: true)],
+        ])
+        let agent = UtilityAgent(
+            model: model,
+            toolLoop: toolLoop,
+            verifier: { paths in await spy.verify(paths) },
+            toolRegistry: WorkspaceToolRegistry(policy: policy),
+            loopPolicy: AgentLoopPolicy(maxToolIterations: 4, maxVerifyAttempts: 1))
+
+        let events = try await collectEvents(agent.run(task: AgentTask(prompt: "edit", kind: .auto)))
+
+        #expect(await spy.callCount() == 2)
+        #expect(verificationOutcomes(events) == [false, false])
+        #expect(completedResult(events)?.text.contains("did not pass after 1 fix attempt") == true)
+    }
+
+    private func collectEvents(_ stream: AsyncThrowingStream<AgentEvent, Error>) async throws -> [AgentEvent] {
+        var events: [AgentEvent] = []
+        for try await event in stream { events.append(event) }
+        return events
+    }
+
+    private func verificationStarts(_ events: [AgentEvent]) -> Int {
+        events.filter { if case .verificationStarted = $0 { return true } else { return false } }.count
+    }
+
+    private func verificationOutcomes(_ events: [AgentEvent]) -> [Bool] {
+        events.compactMap { event in
+            if case let .verificationFinished(passed, _) = event { return passed } else { return nil }
+        }
+    }
+
+    private func completedResult(_ events: [AgentEvent]) -> AgentResult? {
+        events.compactMap { event in
+            if case let .completed(result) = event { return result } else { return nil }
+        }.last
+    }
+
+    private func requestMentions(_ request: GenerationRequest, _ needle: String) -> Bool {
+        guard case let .messages(messages) = request.input else { return false }
+        return messages.contains { $0.content.contains(needle) }
+    }
+
     @Test func nativeLoopRejectsUnknownAndMalformedToolCalls() async throws {
         let temp = try TempAgentWorkspace()
         let toolLoop = try ToolExecutionLoop(root: temp.url)
@@ -547,6 +733,24 @@ private struct FakeSearchProvider: WorkspaceSearchProviding {
     func search(_ query: String, limit: Int) async throws -> [SearchHit] {
         Array(hits.prefix(limit))
     }
+}
+
+private actor VerifierSpy {
+    private let outcomes: [VerificationOutcome?]
+    private(set) var receivedPaths: [[String]] = []
+
+    init(_ outcomes: [VerificationOutcome?]) {
+        self.outcomes = outcomes
+    }
+
+    func verify(_ paths: [String]) -> VerificationOutcome? {
+        let index = receivedPaths.count
+        receivedPaths.append(paths)
+        if index < outcomes.count { return outcomes[index] }
+        return outcomes.last ?? nil
+    }
+
+    func callCount() -> Int { receivedPaths.count }
 }
 
 private actor FakeModelClient: AgentModelClient {

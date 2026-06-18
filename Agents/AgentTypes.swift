@@ -100,6 +100,12 @@ public struct AgentResult: Sendable, Equatable {
     }
 }
 
+/// Runs build/tests over the workspace after edits and reports whether it is
+/// green (`VerificationOutcome` is defined in Tooling). Injected into the agent
+/// runner; absent (`nil`) keeps today's behavior, and a `nil` *result* means
+/// verification was disabled/unavailable for that call.
+public typealias WorkspaceVerifier = @Sendable (_ changedPaths: [String]) async -> VerificationOutcome?
+
 public enum AgentEvent: Sendable, Equatable {
     case routeSelected(AgentRoute)
     case toolIterationStarted(Int)
@@ -111,6 +117,10 @@ public enum AgentEvent: Sendable, Equatable {
     /// Pre-send fitting degraded old tool outputs to previews and/or dropped
     /// oldest history to fit the model's real token budget.
     case contextCompacted(degraded: Int, dropped: Int)
+    /// The harness started an automatic verification pass (1-based attempt).
+    case verificationStarted(attempt: Int)
+    /// An automatic verification pass finished; `summary` is one model/UI line.
+    case verificationFinished(passed: Bool, summary: String)
     case token(TokenChunk)
     case completed(AgentResult)
     case failed(String)
@@ -128,13 +138,30 @@ public enum AgentError: Error, Sendable, Equatable {
 public struct AgentLoopPolicy: Sendable, Equatable, Codable {
     public var maxToolIterations: Int
     public var maxToolCallsPerIteration: Int
+    /// How many times the harness may automatically run verification (build/tests)
+    /// and hand a failure back for the model to fix within a single turn. Each
+    /// attempt grants extra tool iterations beyond `maxToolIterations`.
+    public var maxVerifyAttempts: Int
 
-    public init(maxToolIterations: Int = 4, maxToolCallsPerIteration: Int = 4) {
+    public init(maxToolIterations: Int = 4, maxToolCallsPerIteration: Int = 4, maxVerifyAttempts: Int = 2) {
         self.maxToolIterations = max(0, maxToolIterations)
         self.maxToolCallsPerIteration = max(0, maxToolCallsPerIteration)
+        self.maxVerifyAttempts = max(0, maxVerifyAttempts)
     }
 
     public static let `default` = AgentLoopPolicy()
+
+    private enum CodingKeys: String, CodingKey {
+        case maxToolIterations, maxToolCallsPerIteration, maxVerifyAttempts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            maxToolIterations: try container.decodeIfPresent(Int.self, forKey: .maxToolIterations) ?? 4,
+            maxToolCallsPerIteration: try container.decodeIfPresent(Int.self, forKey: .maxToolCallsPerIteration) ?? 4,
+            maxVerifyAttempts: try container.decodeIfPresent(Int.self, forKey: .maxVerifyAttempts) ?? 2)
+    }
 }
 
 public struct RetryPolicy: Sendable, Equatable, Codable {
