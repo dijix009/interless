@@ -1505,6 +1505,14 @@ public final class WorkspaceSessionModel {
             let text = "Context compacted to fit the model window (\(degraded) tool output\(degraded == 1 ? "" : "s") trimmed, \(dropped) message\(dropped == 1 ? "" : "s") dropped)"
             let id = appendTool(text)
             Task { await persistSessionMessagePart(sessionID: sessionID, messageID: id, role: .system, kind: "context", text: text) }
+        case .verificationStarted(let attempt):
+            let text = attempt > 1 ? "Verifying changes (attempt \(attempt))…" : "Verifying changes…"
+            let id = appendTool(text)
+            Task { await persistSessionMessagePart(sessionID: sessionID, messageID: id, role: .tool, kind: "verificationStarted", text: text) }
+        case .verificationFinished(let passed, let summary):
+            let text = (passed ? "✓ Verified: " : "✗ Verification failed: ") + summary
+            let id = appendTool(text)
+            Task { await persistSessionMessagePart(sessionID: sessionID, messageID: id, role: .tool, kind: "verificationFinished", text: text) }
         case .completed(let result):
             updateGenerationSpeed(for: assistantID, info: result.completionInfo)
             let sanitized = await finalizedCodeModeAssistantText(

@@ -338,7 +338,22 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
         let advertisesRecall = includesWorkspaceContext && embeddingsLoaded
         let registry = WorkspaceToolRegistry(
             policy: policy, advertisesTools: advertisesTools, advertisesRecall: advertisesRecall)
-        let loopPolicy = AgentLoopPolicy(maxToolIterations: runtimeSettings.maxToolIterations)
+        // Autonomous verify→fix: wire a build/test verifier only when writes are
+        // authorized (code mode) and verification is enabled in config.
+        let verificationEnabled = runtimeConfig?.verification?.enabled ?? true
+        let canVerify = verificationEnabled
+            && toolLoop != nil
+            && policy.writePermission != .deny
+            && policy.verifyPermission != .deny
+        let verifier: WorkspaceVerifier?
+        if canVerify, let loop = toolLoop {
+            verifier = { paths in await loop.verify(changedPaths: paths) }
+        } else {
+            verifier = nil
+        }
+        let loopPolicy = AgentLoopPolicy(
+            maxToolIterations: runtimeSettings.maxToolIterations,
+            maxVerifyAttempts: canVerify ? max(0, runtimeConfig?.verification?.maxAttempts ?? 2) : 0)
         let contextBuilder = ContextBuilder(
             searchProvider: includesWorkspaceContext ? WorkspaceIndexSearchProvider(store: store) : nil,
             budget: budget,
@@ -346,6 +361,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
         let orchestratorAgent = OrchestratorAgent(
             model: controller,
             toolLoop: toolLoop,
+            verifier: verifier,
             toolRegistry: registry,
             loopPolicy: loopPolicy,
             resourceBudget: budget,
@@ -357,6 +373,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
         let utilityAgent = UtilityAgent(
             model: controller,
             toolLoop: toolLoop,
+            verifier: verifier,
             toolRegistry: registry,
             loopPolicy: loopPolicy,
             resourceBudget: budget,
