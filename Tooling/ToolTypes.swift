@@ -25,7 +25,7 @@ public enum ToolRequest: Sendable, Equatable, Codable {
     case grep(pattern: String, path: String? = nil, maxResults: Int? = nil)
     case glob(pattern: String, path: String? = nil, maxResults: Int? = nil)
     case todo(items: [ToolTodoItem])
-    case task(prompt: String)
+    case task(prompt: String, agent: String? = nil)
     case question(prompt: String, options: [String] = [])
     case recall(query: String, limit: Int = 5)
     case gitStatus
@@ -401,22 +401,13 @@ public struct ToolQuestionResponse: Sendable, Equatable {
     }
 }
 
-public struct ToolTaskSettlement: Sendable, Equatable {
-    public var jobID: UUID
-    public var status: String
-    public var message: String
-
-    public init(jobID: UUID = UUID(), status: String, message: String) {
-        self.jobID = jobID
-        self.status = status
-        self.message = message
-    }
-}
-
 public struct ToolSettlementHandlers: Sendable {
     public var updateTodos: (@Sendable ([ToolTodoItem]) async throws -> String)?
     public var askQuestion: (@Sendable (ToolQuestionRequest) async throws -> ToolQuestionResponse)?
-    public var scheduleTask: (@Sendable (String) async throws -> ToolTaskSettlement)?
+    /// Run a read-only sub-agent of the given type (default chosen by the app) over
+    /// the workspace and return its summary synchronously. Wired by the app layer;
+    /// absent for sub-agents themselves so they cannot recurse.
+    public var spawnSubagent: (@Sendable (_ prompt: String, _ agent: String?) async throws -> String)?
     /// Recall earlier conversation by semantic query over the whole session; returns
     /// formatted matching turns (or an empty-result note). Wired by the app layer.
     public var recallHistory: (@Sendable (_ query: String, _ limit: Int) async -> String)?
@@ -424,12 +415,12 @@ public struct ToolSettlementHandlers: Sendable {
     public init(
         updateTodos: (@Sendable ([ToolTodoItem]) async throws -> String)? = nil,
         askQuestion: (@Sendable (ToolQuestionRequest) async throws -> ToolQuestionResponse)? = nil,
-        scheduleTask: (@Sendable (String) async throws -> ToolTaskSettlement)? = nil,
+        spawnSubagent: (@Sendable (_ prompt: String, _ agent: String?) async throws -> String)? = nil,
         recallHistory: (@Sendable (_ query: String, _ limit: Int) async -> String)? = nil
     ) {
         self.updateTodos = updateTodos
         self.askQuestion = askQuestion
-        self.scheduleTask = scheduleTask
+        self.spawnSubagent = spawnSubagent
         self.recallHistory = recallHistory
     }
 

@@ -397,7 +397,6 @@ struct ToolingTests {
 
     @Test func todoQuestionAndTaskUseSettlementHandlers() async throws {
         let temp = try TempWorkspace()
-        let jobID = UUID()
         let loop = try ToolExecutionLoop(
             root: temp.url,
             settlementHandlers: ToolSettlementHandlers(
@@ -409,21 +408,20 @@ struct ToolingTests {
                     #expect(request.options == ["yes", "no"])
                     return ToolQuestionResponse(answer: "yes")
                 },
-                scheduleTask: { prompt in
-                    ToolTaskSettlement(jobID: jobID, status: "queued", message: prompt)
+                spawnSubagent: { prompt, agent in
+                    "sub-agent \(agent ?? "explore") summarized: \(prompt)"
                 }))
 
         let todo = try await loop.execute(.todo(items: [
             ToolTodoItem(title: "Inspect", status: .inProgress),
         ]))
         let question = try await loop.execute(.question(prompt: "Proceed?", options: ["yes", "no"]))
-        let task = try await loop.execute(.task(prompt: "Summarize"))
+        let task = try await loop.execute(.task(prompt: "Summarize", agent: "review"))
 
         #expect(todo.stdout == "persisted 1 todos")
         #expect(question.stdout == "yes")
-        #expect(task.stdout.contains(jobID.uuidString))
-        #expect(task.stdout.contains("status: queued"))
-        #expect(task.stdout.contains("Summarize"))
+        // The prompt and agent type reach the handler; its summary is the tool output.
+        #expect(task.stdout == "sub-agent review summarized: Summarize")
     }
 
     @Test func recallHistoryUsesSettlementHandlerAndFallsBackWhenUnwired() async throws {
@@ -457,9 +455,40 @@ struct ToolingTests {
         await #expect(throws: ToolError.settlementUnavailable("question requires UI")) {
             _ = try await loop.execute(.question(prompt: "Proceed?"))
         }
-        await #expect(throws: ToolError.settlementUnavailable("task scheduling unavailable")) {
+        await #expect(throws: ToolError.settlementUnavailable("sub-agent delegation unavailable")) {
             _ = try await loop.execute(.task(prompt: "Summarize"))
         }
+    }
+
+    @Test func taskToolRequestCodableRoundTripsWithAndWithoutAgent() throws {
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        for request: ToolRequest in [.task(prompt: "p"), .task(prompt: "p", agent: "review")] {
+            let data = try encoder.encode(request)
+            #expect(try decoder.decode(ToolRequest.self, from: data) == request)
+        }
+    }
+
+    @Test func taskToolGatedBySubagentAdvertisement() {
+        let writable = ToolExecutionPolicy(allowsWrites: true)
+        // Primary agent advertises `task`; a sub-agent registry hides it (no recursion).
+        #expect(WorkspaceToolRegistry(policy: writable).definitions.map(\.name).contains("task"))
+        #expect(!WorkspaceToolRegistry(policy: writable, advertisesSubagent: false).definitions.map(\.name).contains("task"))
+    }
+
+    @Test func readOnlySubagentRegistryExcludesWritesAndTask() {
+        let registry = WorkspaceToolRegistry(
+            policy: ToolExecutionPolicy(allowsWrites: false, networkEnabled: false),
+            advertisesSubagent: false)
+        let names = Set(registry.definitions.map(\.name))
+        #expect(!names.contains("write_file"))
+        #expect(!names.contains("edit_file"))
+        #expect(!names.contains("apply_patch"))
+        #expect(!names.contains("shell"))
+        #expect(!names.contains("task"))
+        #expect(names.contains("read_file"))
+        #expect(names.contains("grep"))
+        #expect(names.contains("glob"))
     }
 
     @Test func rejectsUnallowlistedShellCommand() async throws {
@@ -637,6 +666,9 @@ struct ToolingTests {
         #expect(try registry.request(from: ModelToolCall(
             name: "task",
             arguments: ["prompt": .string("Summarize")])) == .task(prompt: "Summarize"))
+        #expect(try registry.request(from: ModelToolCall(
+            name: "task",
+            arguments: ["prompt": .string("Find X"), "agent": .string("review")])) == .task(prompt: "Find X", agent: "review"))
         #expect(try registry.request(from: ModelToolCall(
             name: "question",
             arguments: [

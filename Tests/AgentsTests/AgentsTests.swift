@@ -486,6 +486,25 @@ struct AgentsTests {
         #expect(completedResult(events)?.text.contains("did not pass after 1 fix attempt") == true)
     }
 
+    // MARK: - Sub-agent delegation
+
+    @Test func subagentDispatcherRunsSubagentAndReturnsSummary() async throws {
+        let model = FakeModelClient(chunks: [
+            TokenChunk(text: "X is set in Config.swift:42", index: 0, isFinal: true),
+        ])
+        let dispatcher = SubagentDispatcher(catalog: .default, agent: UtilityAgent(model: model))
+        let result = try await dispatcher.dispatch(prompt: "where is X configured", agentID: "explore")
+        #expect(result.text == "X is set in Config.swift:42")
+    }
+
+    @Test func subagentDispatcherRejectsNonSubagentID() async throws {
+        let model = FakeModelClient(chunks: [TokenChunk(text: "unused", index: 0, isFinal: true)])
+        let dispatcher = SubagentDispatcher(catalog: .default, agent: UtilityAgent(model: model))
+        await #expect(throws: AgentCatalogError.notSubagent("build")) {
+            _ = try await dispatcher.dispatch(prompt: "p", agentID: "build")
+        }
+    }
+
     private func collectEvents(_ stream: AsyncThrowingStream<AgentEvent, Error>) async throws -> [AgentEvent] {
         var events: [AgentEvent] = []
         for try await event in stream { events.append(event) }

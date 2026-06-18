@@ -31,6 +31,9 @@ public struct WorkspaceEnvironment: Sendable {
     public var revertSnapshot: @Sendable (_ snapshotID: String) async throws -> WorkspaceMutationRevertResult
     public var executeTool: @Sendable (_ request: ToolRequest, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async throws -> ToolResult
     public var runAgent: @Sendable (_ task: AgentTask, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async -> AsyncThrowingStream<AgentEvent, Error>
+    /// Runs a read-only sub-agent (e.g. `explore`/`review`) synchronously in an
+    /// isolated context and returns its summary. Used by the `task` tool.
+    public var runSubagent: @Sendable (_ prompt: String, _ agent: String?, _ settings: ModelSettingsViewState) async throws -> String
     public var embedTexts: @Sendable (_ texts: [String]) async throws -> [EmbeddingVector]?
     public var loadModels: @Sendable (_ settings: ModelSettingsViewState, _ progressReporter: ModelLoadProgressReporter?) async throws -> Void
     public var unloadModels: @Sendable () async -> Void
@@ -52,6 +55,9 @@ public struct WorkspaceEnvironment: Sendable {
             throw AppRuntimeError.workspaceNotOpen
         },
         runAgent: @escaping @Sendable (_ task: AgentTask, _ settings: ModelSettingsViewState, _ runtimeHooks: ToolRuntimeHooks?) async -> AsyncThrowingStream<AgentEvent, Error>,
+        runSubagent: @escaping @Sendable (_ prompt: String, _ agent: String?, _ settings: ModelSettingsViewState) async throws -> String = { _, _, _ in
+            throw AppRuntimeError.workspaceNotOpen
+        },
         embedTexts: @escaping @Sendable (_ texts: [String]) async throws -> [EmbeddingVector]? = { _ in nil },
         loadModels: @escaping @Sendable (_ settings: ModelSettingsViewState, _ progressReporter: ModelLoadProgressReporter?) async throws -> Void,
         unloadModels: @escaping @Sendable () async -> Void,
@@ -70,6 +76,7 @@ public struct WorkspaceEnvironment: Sendable {
         self.revertSnapshot = revertSnapshot
         self.executeTool = executeTool
         self.runAgent = runAgent
+        self.runSubagent = runSubagent
         self.embedTexts = embedTexts
         self.loadModels = loadModels
         self.unloadModels = unloadModels
@@ -222,6 +229,49 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                     runtimeHooks: runtimeHooks
                 ).run(task: task)
             },
+            runSubagent: { prompt, agent, currentSettings in
+                let resolvedController = await controller.resolve()
+                let runtime = RuntimeConfigMapper.resolve(
+                    config: config?.effective,
+                    settings: currentSettings,
+                    resourceBudget: ResourceBudget.resolved(for: currentSettings.resourceProfile))
+                let trimmedAgent = agent?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let agentID = (trimmedAgent?.isEmpty == false) ? trimmedAgent! : "explore"
+                // Safe no-throw stubs for session/agent tools a sub-agent shouldn't use:
+                // the task tool isn't advertised, but the scoped registry can still
+                // decode a hallucinated call — graceful guidance keeps the sub-agent
+                // (and the parent turn) from crashing on a missing handler.
+                let subagentHooks = ToolRuntimeHooks(settlementHandlers: ToolSettlementHandlers(
+                    askQuestion: { _ in
+                        ToolQuestionResponse(answer: "No user is available to a sub-agent; proceed with your best judgment.")
+                    },
+                    spawnSubagent: { _, _ in
+                        "Nested sub-agents are not allowed. Use read-only tools and report your findings."
+                    },
+                    recallHistory: { _, _ in
+                        "Conversation recall is unavailable to sub-agents."
+                    }))
+                // Read-only sub-agent in its own context: same workspace tools minus
+                // writes/network and the task tool (no recursion). Synchronous, so it
+                // reuses the orchestrator gate and stays serial / 8GB-safe.
+                let subagent = await Self.makeAgent(
+                    root: root,
+                    store: store,
+                    controller: resolvedController,
+                    settings: runtime.settings,
+                    metricsRecorder: metricsRecorder,
+                    includesWorkspaceContext: true,
+                    advertisesTools: runtime.settings.toolCallFormat != nil,
+                    advertisesSubagent: false,
+                    readOnly: true,
+                    snapshotStore: snapshotStore,
+                    agentCatalog: agentCatalog,
+                    runtimeConfig: config?.effective,
+                    runtimeHooks: subagentHooks)
+                let dispatcher = SubagentDispatcher(catalog: agentCatalog, agent: subagent)
+                let result = try await dispatcher.dispatch(prompt: prompt, agentID: agentID)
+                return result.text
+            },
             embedTexts: { texts in
                 guard !texts.isEmpty else { return [] }
                 let resolvedController = await controller.resolve()
@@ -309,6 +359,8 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
         metricsRecorder: MetricsRecorder,
         includesWorkspaceContext: Bool = true,
         advertisesTools: Bool = true,
+        advertisesSubagent: Bool = true,
+        readOnly: Bool = false,
         snapshotStore: WorkspaceSnapshotStore? = nil,
         agentCatalog: AgentCatalog = .default,
         runtimeConfig: InterlessConfig? = nil,
@@ -321,7 +373,14 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
             resourceBudget: budget)
         let runtimeSettings = runtime.settings
         let singleAgentMode = usesSingleAgentMode(runtimeSettings)
-        let policy = runtime.toolPolicy
+        var policy = runtime.toolPolicy
+        if readOnly {
+            // Sub-agents are read-only regardless of workspace config: deny writes,
+            // network/shell, and the verify loop so only read/search tools advertise.
+            policy.writePermission = .deny
+            policy.networkPermission = .deny
+            policy.verifyPermission = .deny
+        }
         let toolLoop = includesWorkspaceContext
             ? (try? ToolExecutionLoop(
                 root: root,
@@ -337,7 +396,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
         let embeddingsLoaded = await controller.loadedRoles.contains(.embeddings)
         let advertisesRecall = includesWorkspaceContext && embeddingsLoaded
         let registry = WorkspaceToolRegistry(
-            policy: policy, advertisesTools: advertisesTools, advertisesRecall: advertisesRecall)
+            policy: policy, advertisesTools: advertisesTools, advertisesRecall: advertisesRecall, advertisesSubagent: advertisesSubagent)
         // Autonomous verify→fix: wire a build/test verifier only when writes are
         // authorized (code mode) and verification is enabled in config.
         let verificationEnabled = runtimeConfig?.verification?.enabled ?? true

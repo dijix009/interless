@@ -2850,9 +2850,9 @@ public final class WorkspaceSessionModel {
                     guard let self else { throw ToolError.settlementUnavailable("question requires UI") }
                     return try await self.askQuestion(request, sessionID: sessionID)
                 },
-                scheduleTask: { [weak self] prompt in
-                    guard let self else { throw ToolError.settlementUnavailable("task scheduling unavailable") }
-                    return try await self.scheduleBackgroundTask(prompt, sessionID: sessionID)
+                spawnSubagent: { [weak self] prompt, agent in
+                    guard let self else { throw ToolError.settlementUnavailable("sub-agent delegation unavailable") }
+                    return try await self.runSubagent(prompt, agent: agent, sessionID: sessionID)
                 },
                 recallHistory: { [weak self] query, limit in
                     guard let self else { return "" }
@@ -2933,26 +2933,41 @@ public final class WorkspaceSessionModel {
         return response
     }
 
-    private func scheduleBackgroundTask(_ prompt: String, sessionID: UUID?) async throws -> ToolTaskSettlement {
+    /// Settlement for the `task` tool: runs a read-only sub-agent (e.g. explore/
+    /// review) synchronously in an isolated context and returns its summary. Shows
+    /// a running entry in the background-jobs strip while it works.
+    private func runSubagent(_ prompt: String, agent: String?, sessionID: UUID?) async throws -> String {
+        guard let environment else {
+            throw ToolError.settlementUnavailable("sub-agent delegation requires an open workspace")
+        }
+        let label = (agent?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? "explore"
         let jobID = UUID()
-        let title = Self.historyTitle(from: prompt).isEmpty ? "Tool task" : Self.historyTitle(from: prompt)
         let job = BackgroundToolJobViewState(
             id: jobID,
-            title: title,
-            status: .queued,
+            title: "Sub-agent: \(label)",
+            status: .running,
             detail: prompt,
             canCancel: false)
         backgroundToolJobs.insert(job, at: 0)
         if backgroundToolJobs.count > 20 {
             backgroundToolJobs.removeLast(backgroundToolJobs.count - 20)
         }
-        await taskScheduler.recordManual(kind: "tool.task", title: title, status: .completed, message: "Queued by task tool")
-        await recordSessionEvent(sessionID: sessionID, kind: .toolCallSettled, payload: [
-            "tool": "task",
-            "jobID": jobID.uuidString,
-            "status": "queued",
-        ])
-        return ToolTaskSettlement(jobID: jobID, status: "queued", message: "Task was recorded for background handling.")
+        await recordSessionEvent(sessionID: sessionID, kind: .toolCallStarted, payload: ["tool": "task", "agent": label])
+        do {
+            let summary = try await environment.runSubagent(prompt, label, settings)
+            setBackgroundJobStatus(jobID, .completed)
+            await recordSessionEvent(sessionID: sessionID, kind: .toolCallSettled, payload: ["tool": "task", "agent": label])
+            return summary.isEmpty ? "Sub-agent \(label) returned no findings." : summary
+        } catch {
+            setBackgroundJobStatus(jobID, .failed)
+            await recordSessionEvent(sessionID: sessionID, kind: .toolCallSettled, payload: ["tool": "task", "agent": label, "status": "failed"])
+            throw error
+        }
+    }
+
+    private func setBackgroundJobStatus(_ id: UUID, _ status: BackgroundToolJobStatus) {
+        guard let index = backgroundToolJobs.firstIndex(where: { $0.id == id }) else { return }
+        backgroundToolJobs[index].status = status
     }
 
     private func permissionRisk(for request: ToolRequest) -> String {

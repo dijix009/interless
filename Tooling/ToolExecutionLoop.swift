@@ -96,14 +96,14 @@ public actor ToolExecutionLoop {
             }.joined(separator: "\n")
             return await manage(ToolResult(request: request, stdout: output))
 
-        case let .task(prompt):
-            guard let scheduleTask = settlementHandlers.scheduleTask else {
-                throw ToolError.settlementUnavailable("task scheduling unavailable")
+        case let .task(prompt, agent):
+            guard let spawnSubagent = settlementHandlers.spawnSubagent else {
+                throw ToolError.settlementUnavailable("sub-agent delegation unavailable")
             }
-            let settlement = try await scheduleTask(prompt)
+            let summary = try await spawnSubagent(prompt, agent)
             return await manage(ToolResult(
                 request: request,
-                stdout: "job_id: \(settlement.jobID.uuidString)\nstatus: \(settlement.status)\n\(settlement.message)"))
+                stdout: String(summary.prefix(policy.maxOutputBytes))))
 
         case let .question(prompt, options):
             guard let askQuestion = settlementHandlers.askQuestion else {
