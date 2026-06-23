@@ -84,4 +84,5 @@ public struct KeychainSecretStore: SecretStore {
 public enum InterlessSecrets {
     public static let service = "dev.interless.secrets"
     public static let huggingFaceTokenAccount = "huggingface.token"
+    public static let anthropicAPIKeyAccount = "anthropic.apiKey"
 }
