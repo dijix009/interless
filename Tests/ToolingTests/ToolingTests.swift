@@ -469,26 +469,22 @@ struct ToolingTests {
         }
     }
 
-    @Test func taskToolGatedBySubagentAdvertisement() {
+    @Test func taskToolHiddenInExplorationOnlyRegistry() {
         let writable = ToolExecutionPolicy(allowsWrites: true)
-        // Primary agent advertises `task`; a sub-agent registry hides it (no recursion).
+        // Primary agent advertises `task`; an exploration-only sub-agent registry hides it.
         #expect(WorkspaceToolRegistry(policy: writable).definitions.map(\.name).contains("task"))
-        #expect(!WorkspaceToolRegistry(policy: writable, advertisesSubagent: false).definitions.map(\.name).contains("task"))
+        #expect(!WorkspaceToolRegistry(policy: writable, explorationOnly: true).definitions.map(\.name).contains("task"))
     }
 
-    @Test func readOnlySubagentRegistryExcludesWritesAndTask() {
+    @Test func explorationOnlyRegistryAdvertisesOnlyReadOnlyWorkspaceTools() {
+        // Even with writes, network, and recall all enabled, an exploration-only
+        // registry advertises exactly the five read-only workspace tools — no
+        // writes/shell/task and no session tools (todo/question/recall_history).
         let registry = WorkspaceToolRegistry(
-            policy: ToolExecutionPolicy(allowsWrites: false, networkEnabled: false),
-            advertisesSubagent: false)
-        let names = Set(registry.definitions.map(\.name))
-        #expect(!names.contains("write_file"))
-        #expect(!names.contains("edit_file"))
-        #expect(!names.contains("apply_patch"))
-        #expect(!names.contains("shell"))
-        #expect(!names.contains("task"))
-        #expect(names.contains("read_file"))
-        #expect(names.contains("grep"))
-        #expect(names.contains("glob"))
+            policy: ToolExecutionPolicy(allowsWrites: true, networkEnabled: true),
+            advertisesRecall: true,
+            explorationOnly: true)
+        #expect(Set(registry.definitions.map(\.name)) == ["read_file", "grep", "glob", "git_status", "git_diff"])
     }
 
     @Test func rejectsUnallowlistedShellCommand() async throws {

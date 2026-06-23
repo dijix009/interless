@@ -45,6 +45,19 @@ struct AgentCatalogTests {
         }
     }
 
+    @Test func onlyPublicSubagentsAreDelegable() {
+        let catalog = AgentCatalog.default
+        // Public sub-agents the task tool may delegate to.
+        #expect(catalog.isDelegableSubagent("explore"))
+        #expect(catalog.isDelegableSubagent("review"))
+        // Hidden internal sub-agents must NOT be reachable via the task tool.
+        #expect(!catalog.isDelegableSubagent("title"))
+        #expect(!catalog.isDelegableSubagent("todo"))
+        // Primary agents and unknown ids are not delegable.
+        #expect(!catalog.isDelegableSubagent("build"))
+        #expect(!catalog.isDelegableSubagent("nope"))
+    }
+
     @Test func modelAgentUsesCatalogSystemPrompt() async throws {
         let catalog = AgentCatalog(configured: [
             "general": AgentDefinition(id: "general", system: "Catalog prompt."),

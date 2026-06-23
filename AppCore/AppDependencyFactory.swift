@@ -236,7 +236,9 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                     settings: currentSettings,
                     resourceBudget: ResourceBudget.resolved(for: currentSettings.resourceProfile))
                 let trimmedAgent = agent?.trimmingCharacters(in: .whitespacesAndNewlines)
-                let agentID = (trimmedAgent?.isEmpty == false) ? trimmedAgent! : "explore"
+                // Only public (non-hidden) subagents like explore/review are delegable;
+                // anything else (incl. hidden internal agents, unknown ids) → explore.
+                let agentID = (trimmedAgent.map { agentCatalog.isDelegableSubagent($0) } ?? false) ? trimmedAgent! : "explore"
                 // Safe no-throw stubs for session/agent tools a sub-agent shouldn't use:
                 // the task tool isn't advertised, but the scoped registry can still
                 // decode a hallucinated call — graceful guidance keeps the sub-agent
@@ -262,7 +264,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                     metricsRecorder: metricsRecorder,
                     includesWorkspaceContext: true,
                     advertisesTools: runtime.settings.toolCallFormat != nil,
-                    advertisesSubagent: false,
+                    explorationOnly: true,
                     readOnly: true,
                     snapshotStore: snapshotStore,
                     agentCatalog: agentCatalog,
@@ -359,7 +361,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
         metricsRecorder: MetricsRecorder,
         includesWorkspaceContext: Bool = true,
         advertisesTools: Bool = true,
-        advertisesSubagent: Bool = true,
+        explorationOnly: Bool = false,
         readOnly: Bool = false,
         snapshotStore: WorkspaceSnapshotStore? = nil,
         agentCatalog: AgentCatalog = .default,
@@ -396,7 +398,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
         let embeddingsLoaded = await controller.loadedRoles.contains(.embeddings)
         let advertisesRecall = includesWorkspaceContext && embeddingsLoaded
         let registry = WorkspaceToolRegistry(
-            policy: policy, advertisesTools: advertisesTools, advertisesRecall: advertisesRecall, advertisesSubagent: advertisesSubagent)
+            policy: policy, advertisesTools: advertisesTools, advertisesRecall: advertisesRecall, explorationOnly: explorationOnly)
         // Autonomous verify→fix: wire a build/test verifier only when writes are
         // authorized (code mode) and verification is enabled in config.
         let verificationEnabled = runtimeConfig?.verification?.enabled ?? true
