@@ -149,7 +149,7 @@ let package = Package(
             name: "AppCore",
             dependencies: [
                 "UI", "Shared", "Core", "Agents", "MLXEngine", "InterlessSecurity",
-                "Persistence", "Workspace", "Tooling",
+                "Persistence", "Workspace", "Tooling", "CloudInference",
             ],
             path: "AppCore",
             swiftSettings: [.swiftLanguageMode(.v6)]

@@ -1851,6 +1851,11 @@ public struct ModelSettingsViewState: Sendable, Equatable, Codable {
     /// tokens the orchestrator verifies. Both models must share a tokenizer.
     public var enableSpeculativeDecoding: Bool
     public var speculativeDraftModelID: String
+    /// Explicit consent to use hosted (cloud) models for orchestrator/sub-agent
+    /// roles. Off by default; when off, a role configured with a `provider/model`
+    /// id (e.g. `anthropic/…`) is refused. Distinct from `allowNetworkTools`
+    /// (shell/network) because it sends prompts + workspace context to the provider.
+    public var allowCloudModels: Bool
 
     public init(
         orchestratorModelID: String = "",
@@ -1866,7 +1871,8 @@ public struct ModelSettingsViewState: Sendable, Equatable, Codable {
         maxToolIterations: Int = 4,
         resourceProfile: ResourceProfile = .automatic,
         enableSpeculativeDecoding: Bool = false,
-        speculativeDraftModelID: String = ""
+        speculativeDraftModelID: String = "",
+        allowCloudModels: Bool = false
     ) {
         self.orchestratorModelID = orchestratorModelID
         self.utilityModelID = utilityModelID
@@ -1882,6 +1888,37 @@ public struct ModelSettingsViewState: Sendable, Equatable, Codable {
         self.resourceProfile = resourceProfile
         self.enableSpeculativeDecoding = enableSpeculativeDecoding
         self.speculativeDraftModelID = speculativeDraftModelID
+        self.allowCloudModels = allowCloudModels
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case orchestratorModelID, utilityModelID, embeddingsModelID
+        case orchestratorQuantization, utilityQuantization, embeddingsQuantization
+        case toolCallFormat, allowWrites, allowNetworkTools, persistPromptHistory
+        case maxToolIterations, resourceProfile, enableSpeculativeDecoding
+        case speculativeDraftModelID, allowCloudModels
+    }
+
+    /// Migration-tolerant decode: every field falls back to its default so older
+    /// persisted settings (missing newer keys like `allowCloudModels`) still load.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            orchestratorModelID: try c.decodeIfPresent(String.self, forKey: .orchestratorModelID) ?? "",
+            utilityModelID: try c.decodeIfPresent(String.self, forKey: .utilityModelID) ?? "",
+            embeddingsModelID: try c.decodeIfPresent(String.self, forKey: .embeddingsModelID) ?? "",
+            orchestratorQuantization: try c.decodeIfPresent(QuantizationLevel.self, forKey: .orchestratorQuantization) ?? .defaultFor(.orchestrator),
+            utilityQuantization: try c.decodeIfPresent(QuantizationLevel.self, forKey: .utilityQuantization) ?? .defaultFor(.utility),
+            embeddingsQuantization: try c.decodeIfPresent(QuantizationLevel.self, forKey: .embeddingsQuantization) ?? .defaultFor(.embeddings),
+            toolCallFormat: try c.decodeIfPresent(ModelToolCallFormat.self, forKey: .toolCallFormat),
+            allowWrites: try c.decodeIfPresent(Bool.self, forKey: .allowWrites) ?? false,
+            allowNetworkTools: try c.decodeIfPresent(Bool.self, forKey: .allowNetworkTools) ?? false,
+            persistPromptHistory: try c.decodeIfPresent(Bool.self, forKey: .persistPromptHistory) ?? true,
+            maxToolIterations: try c.decodeIfPresent(Int.self, forKey: .maxToolIterations) ?? 4,
+            resourceProfile: try c.decodeIfPresent(ResourceProfile.self, forKey: .resourceProfile) ?? .automatic,
+            enableSpeculativeDecoding: try c.decodeIfPresent(Bool.self, forKey: .enableSpeculativeDecoding) ?? false,
+            speculativeDraftModelID: try c.decodeIfPresent(String.self, forKey: .speculativeDraftModelID) ?? "",
+            allowCloudModels: try c.decodeIfPresent(Bool.self, forKey: .allowCloudModels) ?? false)
     }
 
     public func usesSingleAgentMode(
@@ -1929,6 +1966,10 @@ public struct ModelSettingsViewState: Sendable, Equatable, Codable {
 
     public var networkToolWarning: String? {
         allowNetworkTools ? "Trusted process/network tools can execute workspace scripts and commands." : nil
+    }
+
+    public var cloudModelsWarning: String? {
+        allowCloudModels ? "Cloud models send your prompts and workspace context to the hosted provider (e.g. Anthropic)." : nil
     }
 }
 

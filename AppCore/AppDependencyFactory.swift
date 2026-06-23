@@ -1,5 +1,6 @@
 import Foundation
 import Agents
+import CloudInference
 import Core
 import MLXEngine
 import Persistence
@@ -293,6 +294,11 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                 let orchestratorModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["build", "plan"], fallback: runtimeSettings.orchestratorModelID)
                 let utilityModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["general"], fallback: runtimeSettings.utilityModelID)
                 let singleModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["general", "build"], fallback: runtimeSettings.orchestratorModelID)
+                try Self.validateCloudUsage(
+                    orchestrator: singleAgentMode ? singleModelID : orchestratorModelID,
+                    utility: singleAgentMode ? "" : utilityModelID,
+                    embeddings: runtimeSettings.embeddingsModelID,
+                    allowCloudModels: runtimeSettings.allowCloudModels)
                 await resolvedController.unload(role: .orchestrator)
                 await resolvedController.unload(role: .utility)
                 await resolvedController.unload(role: .embeddings)
@@ -351,6 +357,28 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
             memoryPolicy: {
                 await controller.memoryPolicyState()
             })
+    }
+
+    /// Gates hosted (cloud) model usage: cloud orchestrator/utility roles require
+    /// explicit consent, and cloud embedding models are unsupported. Reuses the
+    /// `invalidModelSettings` surface so the message reaches the UI like any other
+    /// settings problem.
+    static func validateCloudUsage(
+        orchestrator: String,
+        utility: String,
+        embeddings: String,
+        allowCloudModels: Bool
+    ) throws {
+        var errors: [String] = []
+        if CloudModelResolver.isCloud(embeddings) {
+            errors.append("Cloud embedding models are not supported; use a local embeddings model.")
+        }
+        if !allowCloudModels {
+            for id in [orchestrator, utility] where CloudModelResolver.isCloud(id) {
+                errors.append("\"\(id)\" is a cloud model. Enable \"Allow cloud models\" in Settings to use it.")
+            }
+        }
+        guard errors.isEmpty else { throw AppRuntimeError.invalidModelSettings(errors) }
     }
 
     private static func makeAgent(

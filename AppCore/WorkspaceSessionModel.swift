@@ -346,6 +346,39 @@ public final class WorkspaceSessionModel {
         }
     }
 
+    public func saveAnthropicAPIKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        Task {
+            do {
+                try await secretStore.save(
+                    trimmed,
+                    service: InterlessSecrets.service,
+                    account: InterlessSecrets.anthropicAPIKeyAccount)
+                appendNotice(severity: .info, title: "Key saved", message: "Anthropic API key was saved in Keychain.")
+                await publish(.init(kind: .model, message: "Saved cloud provider key", metadata: ["provider": "anthropic", "store": "keychain"]))
+            } catch {
+                appendNotice(severity: .error, title: "Key save failed", message: String(describing: error))
+                await recordFailure(kind: .model, message: "Failed to save Anthropic API key.")
+            }
+        }
+    }
+
+    public func deleteAnthropicAPIKey() {
+        Task {
+            do {
+                try await secretStore.delete(
+                    service: InterlessSecrets.service,
+                    account: InterlessSecrets.anthropicAPIKeyAccount)
+                appendNotice(severity: .info, title: "Key deleted", message: "Anthropic API key was removed from Keychain.")
+                await publish(.init(kind: .model, message: "Deleted cloud provider key", metadata: ["provider": "anthropic", "store": "keychain"]))
+            } catch {
+                appendNotice(severity: .error, title: "Key delete failed", message: String(describing: error))
+                await recordFailure(kind: .model, message: "Failed to delete Anthropic API key.")
+            }
+        }
+    }
+
     public func clearPersistedHistory() {
         Task {
             do {
