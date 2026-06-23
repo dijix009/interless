@@ -63,6 +63,7 @@ let package = Package(
             dependencies: [
                 "Shared",
                 "Core",
+                "CloudInference",
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXEmbedders", package: "mlx-swift-lm"),
@@ -183,7 +184,7 @@ let package = Package(
         // Fast, model-free unit tests (default `swift test`).
         .testTarget(
             name: "MLXEngineTests",
-            dependencies: ["MLXEngine", "Core", "Shared"],
+            dependencies: ["MLXEngine", "Core", "Shared", "CloudInference"],
             path: "Tests/MLXEngineTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
