@@ -2952,14 +2952,19 @@ public final class WorkspaceSessionModel {
         if backgroundToolJobs.count > 20 {
             backgroundToolJobs.removeLast(backgroundToolJobs.count - 20)
         }
+        // Durable task lifecycle so sub-agent runs appear in the scheduler snapshot
+        // (diagnostics export + health), not just the ephemeral jobs strip.
+        let taskID = await taskScheduler.begin(kind: "tool.subagent", title: "Sub-agent: \(label)", priority: .utility)
         await recordSessionEvent(sessionID: sessionID, kind: .toolCallStarted, payload: ["tool": "task", "agent": label])
         do {
             let summary = try await environment.runSubagent(prompt, label, settings)
             setBackgroundJobStatus(jobID, .completed)
+            await taskScheduler.finish(id: taskID, status: .completed, message: "Sub-agent \(label) completed")
             await recordSessionEvent(sessionID: sessionID, kind: .toolCallSettled, payload: ["tool": "task", "agent": label])
             return summary.isEmpty ? "Sub-agent \(label) returned no findings." : summary
         } catch {
             setBackgroundJobStatus(jobID, .failed)
+            await taskScheduler.finish(id: taskID, status: .failed, message: String(describing: error))
             await recordSessionEvent(sessionID: sessionID, kind: .toolCallSettled, payload: ["tool": "task", "agent": label, "status": "failed"])
             throw error
         }

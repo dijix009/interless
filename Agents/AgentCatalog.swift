@@ -32,6 +32,14 @@ public struct AgentCatalog: Sendable, Equatable {
         orderedAgents.filter { $0.mode == .subagent || $0.mode == .all }
     }
 
+    /// Whether the `task` tool may delegate to this agent id: a public (non-hidden)
+    /// subagent such as `explore`/`review`. Hidden internal agents (`title`/`todo`)
+    /// are intentionally excluded so they can't be invoked as workspace sub-agents.
+    public func isDelegableSubagent(_ id: String) -> Bool {
+        guard let definition = definitions[id] else { return false }
+        return (definition.mode == .subagent || definition.mode == .all) && !definition.hidden
+    }
+
     public func definition(id: String) -> AgentDefinition? {
         definitions[id]
     }

@@ -7,22 +7,29 @@ public struct WorkspaceToolRegistry: Sendable, Equatable {
     /// Whether to advertise `recall_history` — only when a session store with
     /// message embeddings is available (else the tool would always return empty).
     public var advertisesRecall: Bool
-    /// Whether to advertise the `task` sub-agent tool. False for sub-agents
-    /// themselves so a read-only sub-agent cannot spawn another (no recursion).
-    public var advertisesSubagent: Bool
+    /// When true, advertise only the read-only workspace tools (used for read-only
+    /// sub-agents) — the model never sees writes, shell/tests, the `task` tool, or
+    /// session tools (todo/question/recall). The scoped decode path is unchanged,
+    /// so a hallucinated call to a hidden tool still decodes (and is handled).
+    public var explorationOnly: Bool
     public var generation: Int
 
-    public init(policy: ToolExecutionPolicy = .default, advertisesTools: Bool = true, advertisesRecall: Bool = false, advertisesSubagent: Bool = true, generation: Int = 1) {
+    public init(policy: ToolExecutionPolicy = .default, advertisesTools: Bool = true, advertisesRecall: Bool = false, explorationOnly: Bool = false, generation: Int = 1) {
         self.policy = policy
         self.advertisesTools = advertisesTools
         self.advertisesRecall = advertisesRecall
-        self.advertisesSubagent = advertisesSubagent
+        self.explorationOnly = explorationOnly
         self.generation = generation
     }
 
+    /// The only tools advertised to a read-only sub-agent in exploration-only mode.
+    public static let explorationToolNames: Set<String> = ["read_file", "grep", "glob", "git_status", "git_diff"]
+
     public var definitions: [ToolDefinition] {
         guard advertisesTools else { return [] }
-        return makeRegistry(advertisedOnly: true).definitions
+        let advertised = makeRegistry(advertisedOnly: true).definitions
+        guard explorationOnly else { return advertised }
+        return advertised.filter { Self.explorationToolNames.contains($0.name) }
     }
 
     public var scopedRegistry: ScopedToolRegistry {
@@ -77,7 +84,7 @@ public struct WorkspaceToolRegistry: Sendable, Equatable {
         include(todoDefinition, scope: .session) { call in
             .todo(items: try requiredTodoItems("items", in: call))
         }
-        include(taskDefinition, scope: .agent, advertised: advertisesSubagent) { call in
+        include(taskDefinition, scope: .agent) { call in
             .task(
                 prompt: try requiredString("prompt", in: call),
                 agent: try optionalString("agent", in: call))
