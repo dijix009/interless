@@ -6,11 +6,13 @@ import InterlessSecurity
 /// default; these are opt-in. (OpenAI is a planned sibling.)
 public enum CloudProvider: String, Sendable, Equatable, CaseIterable {
     case anthropic
+    case openai
 
     /// Keychain account holding this provider's API key.
     public var keychainAccount: String {
         switch self {
         case .anthropic: return InterlessSecrets.anthropicAPIKeyAccount
+        case .openai: return InterlessSecrets.openAIAPIKeyAccount
         }
     }
 
@@ -18,6 +20,7 @@ public enum CloudProvider: String, Sendable, Equatable, CaseIterable {
     public var environmentVariable: String {
         switch self {
         case .anthropic: return "ANTHROPIC_API_KEY"
+        case .openai: return "OPENAI_API_KEY"
         }
     }
 }

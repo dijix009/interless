@@ -159,6 +159,8 @@ private struct WorkspaceShell: View {
                 deleteHuggingFaceToken: session.deleteHuggingFaceToken,
                 saveAnthropicAPIKey: session.saveAnthropicAPIKey,
                 deleteAnthropicAPIKey: session.deleteAnthropicAPIKey,
+                saveOpenAIAPIKey: session.saveOpenAIAPIKey,
+                deleteOpenAIAPIKey: session.deleteOpenAIAPIKey,
                 retryRecoveryAction: session.retryRecoveryAction,
                 dismissRecoveryItem: session.dismissRecoveryItem,
                 clearRecoveryJournal: session.clearRecoveryJournal,

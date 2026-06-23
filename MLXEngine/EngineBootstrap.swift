@@ -28,7 +28,10 @@ public enum EngineBootstrap {
         // consent + key checks in the app layer).
         let backend = RoutingInferenceBackend(
             local: MLXBackend(engineTuning: engineTuning),
-            remote: RemoteInferenceBackend(client: AnthropicModelClient()))
+            remote: RemoteInferenceBackend(clients: [
+                .anthropic: AnthropicModelClient(),
+                .openai: OpenAIModelClient(),
+            ]))
         let controller = InferenceController(
             backend: backend,
             memoryMonitor: MemoryPressureMonitor(thresholds: thresholds),

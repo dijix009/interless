@@ -2,16 +2,25 @@ import Foundation
 import Shared
 import CloudInference
 
-/// `InferenceBackend` over a hosted `CloudModelClient` (e.g. Anthropic). The
-/// lifecycle is intentionally hollow: there are no local weights, KV cache, or
-/// GPU/RAM to manage, so `load`/`unload`/`clearKVCache`/draft ops are no-ops and
-/// memory readings are zero. `generate` delegates to the client using the model
-/// id carried on the handle (provider prefix stripped). Embeddings stay local.
+/// `InferenceBackend` over one or more hosted `CloudModelClient`s (Anthropic,
+/// OpenAI, …), selected per call by the model id's provider prefix. The lifecycle
+/// is intentionally hollow: there are no local weights, KV cache, or GPU/RAM to
+/// manage, so `load`/`unload`/`clearKVCache`/draft ops are no-ops and memory
+/// readings are zero. `generate` delegates to the resolved provider's client
+/// using the bare model name. Embeddings stay local (throws here).
 public struct RemoteInferenceBackend: InferenceBackend {
-    private let client: any CloudModelClient
+    private let clients: [CloudProvider: any CloudModelClient]
 
-    public init(client: any CloudModelClient) {
-        self.client = client
+    public init(clients: [CloudProvider: any CloudModelClient]) {
+        self.clients = clients
+    }
+
+    private func resolve(_ id: String) -> (model: String, client: any CloudModelClient)? {
+        guard let resolved = CloudModelResolver.resolve(id),
+              let client = clients[resolved.provider] else {
+            return nil
+        }
+        return (resolved.model, client)
     }
 
     public func load(
@@ -21,6 +30,9 @@ public struct RemoteInferenceBackend: InferenceBackend {
         toolCallFormat: ModelToolCallFormat?,
         progressHandler: (@Sendable (Double) -> Void)?
     ) async throws -> LoadedModelHandle {
+        guard let (_, client) = resolve(id) else {
+            throw InferenceError.modelLoadFailed(role: role, underlying: "no configured cloud provider for model id \"\(id)\"")
+        }
         // Nothing to download; surface a missing-key error here so it appears at
         // "load" time rather than mid-generation.
         try await client.validate()
@@ -29,7 +41,13 @@ public struct RemoteInferenceBackend: InferenceBackend {
     }
 
     public func generate(request: GenerationRequest, handle: LoadedModelHandle) -> AsyncThrowingStream<TokenChunk, Error> {
-        client.stream(model: Self.modelName(from: handle.id), request: request)
+        guard let (model, client) = resolve(handle.id) else {
+            return AsyncThrowingStream { continuation in
+                continuation.finish(throwing: InferenceError.generationFailed(
+                    "no configured cloud provider for model id \"\(handle.id)\""))
+            }
+        }
+        return client.stream(model: model, request: request)
     }
 
     public func embed(texts: [String], handle: LoadedModelHandle) async throws -> [EmbeddingVector] {
@@ -43,10 +61,5 @@ public struct RemoteInferenceBackend: InferenceBackend {
     public func gpuMemory() async -> GPUMemory { GPUMemory() }
     public func footprint() async -> MemoryFootprint {
         MemoryFootprint(processFootprintBytes: 0, totalUnifiedBytes: 0)
-    }
-
-    /// `anthropic/claude-opus-4-8` → `claude-opus-4-8`; leaves bare ids unchanged.
-    static func modelName(from id: String) -> String {
-        CloudModelResolver.resolve(id)?.model ?? id
     }
 }

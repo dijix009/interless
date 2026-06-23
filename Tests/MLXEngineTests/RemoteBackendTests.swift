@@ -8,7 +8,7 @@ struct RemoteBackendTests {
 
     @Test func remoteBackendDelegatesAndStripsProviderPrefix() async throws {
         let client = FakeCloudModelClient(texts: ["A", "B"])
-        let backend = RemoteInferenceBackend(client: client)
+        let backend = RemoteInferenceBackend(clients: [.anthropic: client])
 
         let handle = try await backend.load(
             id: "anthropic/claude-opus-4-8", role: .orchestrator,
@@ -23,7 +23,7 @@ struct RemoteBackendTests {
     }
 
     @Test func remoteBackendEmbedThrows() async throws {
-        let backend = RemoteInferenceBackend(client: FakeCloudModelClient(texts: []))
+        let backend = RemoteInferenceBackend(clients: [.anthropic: FakeCloudModelClient(texts: [])])
         let handle = LoadedModelHandle(role: .embeddings, id: "anthropic/x", quantization: .q8)
         await #expect(throws: InferenceError.self) {
             _ = try await backend.embed(texts: ["x"], handle: handle)
@@ -33,7 +33,7 @@ struct RemoteBackendTests {
     @Test func routingDispatchesByModelId() async throws {
         let local = FakeBackend()
         await local.setScriptedTokens(["LOCAL"])
-        let remote = RemoteInferenceBackend(client: FakeCloudModelClient(texts: ["REMOTE"]))
+        let remote = RemoteInferenceBackend(clients: [.anthropic: FakeCloudModelClient(texts: ["REMOTE"])])
         let routing = RoutingInferenceBackend(local: local, remote: remote)
 
         let localHandle = try await routing.load(
@@ -49,6 +49,24 @@ struct RemoteBackendTests {
         let cloudChunks = try await collect(routing.generate(
             request: .prompt("y", role: .orchestrator), handle: cloudHandle))
         #expect(cloudChunks.filter { !$0.text.isEmpty }.map(\.text) == ["REMOTE"])
+    }
+
+    @Test func remoteBackendRoutesByProviderPrefix() async throws {
+        let anthropic = FakeCloudModelClient(texts: ["A"])
+        let openai = FakeCloudModelClient(texts: ["O"])
+        let backend = RemoteInferenceBackend(clients: [.anthropic: anthropic, .openai: openai])
+
+        let aHandle = try await backend.load(
+            id: "anthropic/claude-opus-4-8", role: .orchestrator,
+            quantization: .q8, toolCallFormat: nil, progressHandler: nil)
+        _ = try await collect(backend.generate(request: .prompt("x", role: .orchestrator), handle: aHandle))
+        #expect(anthropic.capturedModel == "claude-opus-4-8")
+
+        let oHandle = try await backend.load(
+            id: "openai/gpt-4o", role: .utility,
+            quantization: .q8, toolCallFormat: nil, progressHandler: nil)
+        _ = try await collect(backend.generate(request: .prompt("y", role: .utility), handle: oHandle))
+        #expect(openai.capturedModel == "gpt-4o")
     }
 }
 

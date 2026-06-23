@@ -17,6 +17,8 @@ public struct ModelSettingsView: View {
     public var onDeleteHuggingFaceToken: @MainActor () -> Void
     public var onSaveAnthropicAPIKey: @MainActor (String) -> Void
     public var onDeleteAnthropicAPIKey: @MainActor () -> Void
+    public var onSaveOpenAIAPIKey: @MainActor (String) -> Void
+    public var onDeleteOpenAIAPIKey: @MainActor () -> Void
     private let headerTitle: String?
     private let headerSubtitle: String
     private let embedsInParentScroll: Bool
@@ -25,6 +27,7 @@ public struct ModelSettingsView: View {
     private let showsDangerZone: Bool
     @State private var huggingFaceToken = ""
     @State private var anthropicAPIKey = ""
+    @State private var openAIAPIKey = ""
     @State private var showAdvanced = false
 
     public init(
@@ -43,6 +46,8 @@ public struct ModelSettingsView: View {
         onDeleteHuggingFaceToken: @escaping @MainActor () -> Void = {},
         onSaveAnthropicAPIKey: @escaping @MainActor (String) -> Void = { _ in },
         onDeleteAnthropicAPIKey: @escaping @MainActor () -> Void = {},
+        onSaveOpenAIAPIKey: @escaping @MainActor (String) -> Void = { _ in },
+        onDeleteOpenAIAPIKey: @escaping @MainActor () -> Void = {},
         headerTitle: String? = "Providers",
         headerSubtitle: String = "Local MLX model setup and native tool-call compatibility.",
         embedsInParentScroll: Bool = false,
@@ -65,6 +70,8 @@ public struct ModelSettingsView: View {
         self.onDeleteHuggingFaceToken = onDeleteHuggingFaceToken
         self.onSaveAnthropicAPIKey = onSaveAnthropicAPIKey
         self.onDeleteAnthropicAPIKey = onDeleteAnthropicAPIKey
+        self.onSaveOpenAIAPIKey = onSaveOpenAIAPIKey
+        self.onDeleteOpenAIAPIKey = onDeleteOpenAIAPIKey
         self.headerTitle = headerTitle
         self.headerSubtitle = headerSubtitle
         self.embedsInParentScroll = embedsInParentScroll
@@ -292,6 +299,25 @@ public struct ModelSettingsView: View {
                     }
                     .font(.bodyS.weight(.semibold))
                     Text("Stored only in Keychain. Used when a role's model id is a cloud id (e.g. anthropic/claude-opus-4-8) and cloud models are allowed below.")
+                        .font(.metaMono)
+                        .foregroundStyle(Theme.C.textSecondary)
+                    settingsDivider()
+                    controlRow("OpenAI API key") {
+                        SecureField("sk-…", text: $openAIAPIKey)
+                            .textContentType(.password)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 360)
+                    }
+                    HStack(spacing: .space2) {
+                        Button("Save Key") {
+                            onSaveOpenAIAPIKey(openAIAPIKey)
+                            openAIAPIKey = ""
+                        }
+                        .disabled(openAIAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Delete Key", action: onDeleteOpenAIAPIKey)
+                    }
+                    .font(.bodyS.weight(.semibold))
+                    Text("Stored only in Keychain. Used for cloud ids like openai/gpt-4o when cloud models are allowed below.")
                         .font(.metaMono)
                         .foregroundStyle(Theme.C.textSecondary)
                     if showsResourceProfileControl {
