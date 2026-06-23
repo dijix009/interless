@@ -38,6 +38,8 @@ public struct WorkspaceViewActions {
     public var cancelModelLoad: @MainActor () -> Void
     public var saveHuggingFaceToken: @MainActor (String) -> Void
     public var deleteHuggingFaceToken: @MainActor () -> Void
+    public var saveAnthropicAPIKey: @MainActor (String) -> Void
+    public var deleteAnthropicAPIKey: @MainActor () -> Void
     public var retryRecoveryAction: @MainActor (UUID) -> Void
     public var dismissRecoveryItem: @MainActor (UUID) -> Void
     public var clearRecoveryJournal: @MainActor () -> Void
@@ -82,6 +84,8 @@ public struct WorkspaceViewActions {
         cancelModelLoad: @escaping @MainActor () -> Void,
         saveHuggingFaceToken: @escaping @MainActor (String) -> Void = { _ in },
         deleteHuggingFaceToken: @escaping @MainActor () -> Void = {},
+        saveAnthropicAPIKey: @escaping @MainActor (String) -> Void = { _ in },
+        deleteAnthropicAPIKey: @escaping @MainActor () -> Void = {},
         retryRecoveryAction: @escaping @MainActor (UUID) -> Void,
         dismissRecoveryItem: @escaping @MainActor (UUID) -> Void,
         clearRecoveryJournal: @escaping @MainActor () -> Void,
@@ -125,6 +129,8 @@ public struct WorkspaceViewActions {
         self.cancelModelLoad = cancelModelLoad
         self.saveHuggingFaceToken = saveHuggingFaceToken
         self.deleteHuggingFaceToken = deleteHuggingFaceToken
+        self.saveAnthropicAPIKey = saveAnthropicAPIKey
+        self.deleteAnthropicAPIKey = deleteAnthropicAPIKey
         self.retryRecoveryAction = retryRecoveryAction
         self.dismissRecoveryItem = dismissRecoveryItem
         self.clearRecoveryJournal = clearRecoveryJournal
@@ -845,6 +851,8 @@ public struct WorkspaceView: View {
                             onApplyRecommendations: actions.applyRecommendedModels,
                             onSaveHuggingFaceToken: actions.saveHuggingFaceToken,
                             onDeleteHuggingFaceToken: actions.deleteHuggingFaceToken,
+                            onSaveAnthropicAPIKey: actions.saveAnthropicAPIKey,
+                            onDeleteAnthropicAPIKey: actions.deleteAnthropicAPIKey,
                             onOpenHealth: actions.openHealth,
                             onExportDiagnostics: actions.exportDiagnostics,
                             onUpdateModelContextSettings: actions.setModelContextSettings)

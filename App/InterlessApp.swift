@@ -157,6 +157,8 @@ private struct WorkspaceShell: View {
                 cancelModelLoad: { session.cancelModelLoad() },
                 saveHuggingFaceToken: session.saveHuggingFaceToken,
                 deleteHuggingFaceToken: session.deleteHuggingFaceToken,
+                saveAnthropicAPIKey: session.saveAnthropicAPIKey,
+                deleteAnthropicAPIKey: session.deleteAnthropicAPIKey,
                 retryRecoveryAction: session.retryRecoveryAction,
                 dismissRecoveryItem: session.dismissRecoveryItem,
                 clearRecoveryJournal: session.clearRecoveryJournal,

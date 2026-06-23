@@ -27,6 +27,8 @@ public struct SettingsHubView: View {
     public var onApplyRecommendations: @MainActor () -> Void
     public var onSaveHuggingFaceToken: @MainActor (String) -> Void
     public var onDeleteHuggingFaceToken: @MainActor () -> Void
+    public var onSaveAnthropicAPIKey: @MainActor (String) -> Void
+    public var onDeleteAnthropicAPIKey: @MainActor () -> Void
     public var onOpenHealth: @MainActor () -> Void
     public var onExportDiagnostics: @MainActor () -> Void
     public var onUpdateModelContextSettings: @MainActor (ModelContextSettingsViewState) -> Void
@@ -64,6 +66,8 @@ public struct SettingsHubView: View {
         onApplyRecommendations: @escaping @MainActor () -> Void,
         onSaveHuggingFaceToken: @escaping @MainActor (String) -> Void,
         onDeleteHuggingFaceToken: @escaping @MainActor () -> Void,
+        onSaveAnthropicAPIKey: @escaping @MainActor (String) -> Void = { _ in },
+        onDeleteAnthropicAPIKey: @escaping @MainActor () -> Void = {},
         onOpenHealth: @escaping @MainActor () -> Void,
         onExportDiagnostics: @escaping @MainActor () -> Void,
         onUpdateModelContextSettings: @escaping @MainActor (ModelContextSettingsViewState) -> Void
@@ -77,6 +81,8 @@ public struct SettingsHubView: View {
         self.onApplyRecommendations = onApplyRecommendations
         self.onSaveHuggingFaceToken = onSaveHuggingFaceToken
         self.onDeleteHuggingFaceToken = onDeleteHuggingFaceToken
+        self.onSaveAnthropicAPIKey = onSaveAnthropicAPIKey
+        self.onDeleteAnthropicAPIKey = onDeleteAnthropicAPIKey
         self.onOpenHealth = onOpenHealth
         self.onExportDiagnostics = onExportDiagnostics
         self.onUpdateModelContextSettings = onUpdateModelContextSettings
@@ -209,7 +215,9 @@ public struct SettingsHubView: View {
                 onDismissOnboarding: onDismissOnboarding,
                 onApplyRecommendations: onApplyRecommendations,
                 onSaveHuggingFaceToken: onSaveHuggingFaceToken,
-                onDeleteHuggingFaceToken: onDeleteHuggingFaceToken)
+                onDeleteHuggingFaceToken: onDeleteHuggingFaceToken,
+                onSaveAnthropicAPIKey: onSaveAnthropicAPIKey,
+                onDeleteAnthropicAPIKey: onDeleteAnthropicAPIKey)
         case .usage:
             settingsScroll { usageSection }
         case .skills:
@@ -373,6 +381,8 @@ public struct SettingsHubView: View {
                 onApplyRecommendations: onApplyRecommendations,
                 onSaveHuggingFaceToken: onSaveHuggingFaceToken,
                 onDeleteHuggingFaceToken: onDeleteHuggingFaceToken,
+                onSaveAnthropicAPIKey: onSaveAnthropicAPIKey,
+                onDeleteAnthropicAPIKey: onDeleteAnthropicAPIKey,
                 headerTitle: nil,
                 embedsInParentScroll: true,
                 showsRuntimeControls: false,
