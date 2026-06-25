@@ -215,7 +215,9 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                     config: config?.effective,
                     settings: currentSettings,
                     resourceBudget: ResourceBudget.resolved(for: currentSettings.resourceProfile))
-                let canAdvertiseNativeTools = runtime.settings.toolCallFormat != nil
+                let orchestratorModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["build", "plan"], fallback: runtime.settings.orchestratorModelID)
+                let canAdvertiseNativeTools = Self.advertisesNativeTools(
+                    modelID: orchestratorModelID, toolCallFormat: runtime.settings.toolCallFormat)
                 return await Self.makeAgent(
                     root: root,
                     store: store,
@@ -257,6 +259,10 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                 // Read-only sub-agent in its own context: same workspace tools minus
                 // writes/network and the task tool (no recursion). Synchronous, so it
                 // reuses the orchestrator gate and stays serial / 8GB-safe.
+                // The sub-agent runs on the utility role's model, so its tool
+                // advertisement keys off that id (cloud → native tools regardless of
+                // toolCallFormat).
+                let subagentModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["general"], fallback: runtime.settings.utilityModelID)
                 let subagent = await Self.makeAgent(
                     root: root,
                     store: store,
@@ -264,7 +270,7 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                     settings: runtime.settings,
                     metricsRecorder: metricsRecorder,
                     includesWorkspaceContext: true,
-                    advertisesTools: runtime.settings.toolCallFormat != nil,
+                    advertisesTools: Self.advertisesNativeTools(modelID: subagentModelID, toolCallFormat: runtime.settings.toolCallFormat),
                     explorationOnly: true,
                     readOnly: true,
                     snapshotStore: snapshotStore,
@@ -290,10 +296,11 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
                 let runtimeSettings = runtime.settings
                 let errors = runtimeSettings.validationErrors()
                 guard errors.isEmpty else { throw AppRuntimeError.invalidModelSettings(errors) }
-                let singleAgentMode = Self.usesSingleAgentMode(runtimeSettings)
                 let orchestratorModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["build", "plan"], fallback: runtimeSettings.orchestratorModelID)
                 let utilityModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["general"], fallback: runtimeSettings.utilityModelID)
                 let singleModelID = Self.agentModelID(agentCatalog: agentCatalog, agentIDs: ["general", "build"], fallback: runtimeSettings.orchestratorModelID)
+                let singleAgentMode = Self.effectiveSingleAgentMode(
+                    settings: runtimeSettings, orchestratorID: orchestratorModelID, utilityID: utilityModelID)
                 try Self.validateCloudUsage(
                     orchestrator: singleAgentMode ? singleModelID : orchestratorModelID,
                     utility: singleAgentMode ? "" : utilityModelID,
@@ -402,7 +409,10 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
             settings: settings,
             resourceBudget: budget)
         let runtimeSettings = runtime.settings
-        let singleAgentMode = usesSingleAgentMode(runtimeSettings)
+        let orchestratorModelID = agentModelID(agentCatalog: agentCatalog, agentIDs: ["build", "plan"], fallback: runtimeSettings.orchestratorModelID)
+        let utilityModelID = agentModelID(agentCatalog: agentCatalog, agentIDs: ["general"], fallback: runtimeSettings.utilityModelID)
+        let singleAgentMode = effectiveSingleAgentMode(
+            settings: runtimeSettings, orchestratorID: orchestratorModelID, utilityID: utilityModelID)
         var policy = runtime.toolPolicy
         if readOnly {
             // Sub-agents are read-only regardless of workspace config: deny writes,
@@ -505,6 +515,24 @@ public struct LiveAppDependencyFactory: AppDependencyFactory {
 
     private static func usesSingleAgentMode(_ settings: ModelSettingsViewState) -> Bool {
         settings.usesSingleAgentMode()
+    }
+
+    /// Single-agent collapse is about LOCAL RAM, not cloud. Cloud roles cost zero
+    /// local memory, so only collapse to one agent when small-RAM AND both roles
+    /// are local (two local models won't fit). Otherwise allow per-role mixing
+    /// (e.g. cloud orchestrator + local/cloud sub-agent) even on an 8 GB Mac.
+    static func effectiveSingleAgentMode(
+        settings: ModelSettingsViewState, orchestratorID: String, utilityID: String
+    ) -> Bool {
+        guard usesSingleAgentMode(settings) else { return false }
+        return !CloudModelResolver.isCloud(orchestratorID) && !CloudModelResolver.isCloud(utilityID)
+    }
+
+    /// Native tool-calling is available for any cloud model (provider-native) and
+    /// for local models only when a tool-call format is configured. `toolCallFormat`
+    /// is a local text-grammar concept and must not gate cloud roles.
+    static func advertisesNativeTools(modelID: String, toolCallFormat: ModelToolCallFormat?) -> Bool {
+        CloudModelResolver.isCloud(modelID) || toolCallFormat != nil
     }
 
     private static func mergeSearchHits(
