@@ -1,5 +1,6 @@
 import Core
 import Shared
+import CloudInference
 
 /// Phase 1 composition root for the inference stack.
 ///
@@ -21,8 +22,18 @@ public enum EngineBootstrap {
         let budget = ResourceBudget.resolved(for: resourceProfile)
         var engineTuning = budget.engineTuning
         if let gpuCacheLimitBytes { engineTuning.gpuCacheLimitBytes = gpuCacheLimitBytes }
+        // Local MLX is the default; the routing backend sends only `provider/model`
+        // ids (e.g. `anthropic/…`) to the hosted backend. Local ids are unaffected,
+        // and the remote backend is inert until a cloud id is loaded (gated by the
+        // consent + key checks in the app layer).
+        let backend = RoutingInferenceBackend(
+            local: MLXBackend(engineTuning: engineTuning),
+            remote: RemoteInferenceBackend(clients: [
+                .anthropic: AnthropicModelClient(),
+                .openai: OpenAIModelClient(),
+            ]))
         let controller = InferenceController(
-            backend: MLXBackend(engineTuning: engineTuning),
+            backend: backend,
             memoryMonitor: MemoryPressureMonitor(thresholds: thresholds),
             memoryCoordinator: memoryCoordinator,
             resourceProfile: resourceProfile

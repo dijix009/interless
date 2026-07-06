@@ -18,6 +18,7 @@ let package = Package(
         .library(name: "Workspace", targets: ["Workspace"]),
         .library(name: "Tooling", targets: ["Tooling"]),
         .library(name: "InterlessSecurity", targets: ["InterlessSecurity"]),
+        .library(name: "CloudInference", targets: ["CloudInference"]),
         .library(name: "Agents", targets: ["Agents"]),
         .library(name: "AgentCLI", targets: ["AgentCLI"]),
         .library(name: "UI", targets: ["UI"]),
@@ -62,6 +63,7 @@ let package = Package(
             dependencies: [
                 "Shared",
                 "Core",
+                "CloudInference",
                 .product(name: "MLXLLM", package: "mlx-swift-lm"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "MLXEmbedders", package: "mlx-swift-lm"),
@@ -114,6 +116,14 @@ let package = Package(
             exclude: ["README.md"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
+        // MARK: - CloudInference (optional hosted-model backends, e.g. Anthropic;
+        // MLX-free — depends only on Shared value types + Keychain secrets).
+        .target(
+            name: "CloudInference",
+            dependencies: ["Shared", "InterlessSecurity"],
+            path: "CloudInference",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
         // MARK: - Agents (Phase 3; orchestration/runtime; no UI/Persistence imports)
         .target(
             name: "Agents",
@@ -139,7 +149,7 @@ let package = Package(
             name: "AppCore",
             dependencies: [
                 "UI", "Shared", "Core", "Agents", "MLXEngine", "InterlessSecurity",
-                "Persistence", "Workspace", "Tooling",
+                "Persistence", "Workspace", "Tooling", "CloudInference",
             ],
             path: "AppCore",
             swiftSettings: [.swiftLanguageMode(.v6)]
@@ -174,7 +184,7 @@ let package = Package(
         // Fast, model-free unit tests (default `swift test`).
         .testTarget(
             name: "MLXEngineTests",
-            dependencies: ["MLXEngine", "Core", "Shared"],
+            dependencies: ["MLXEngine", "Core", "Shared", "CloudInference"],
             path: "Tests/MLXEngineTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
@@ -223,6 +233,13 @@ let package = Package(
             name: "SecurityTests",
             dependencies: ["InterlessSecurity"],
             path: "Tests/SecurityTests",
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        // Fast CloudInference tests: fake HTTP transport + canned SSE, no network.
+        .testTarget(
+            name: "CloudInferenceTests",
+            dependencies: ["CloudInference", "Shared"],
+            path: "Tests/CloudInferenceTests",
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         // Fast Agent tests: fake model/search + real restricted tooling.
